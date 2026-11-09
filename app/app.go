@@ -59,6 +59,14 @@ func (a *App) Done() <-chan struct{} { return a.ctx.Done() }
 
 func (a *App) Start() error {
 	bot.SetRestartHandler(a.RequestRestart)
+	handlers.SetStorageConfigUpdater(func(ctx context.Context, storageID uint, patch map[string]any) error {
+		record, err := database.GetStorageRecord(ctx, storageID)
+		if err != nil {
+			return err
+		}
+		_, err = a.svc.UpdateStorage(ctx, storageID, settings.StorageInput{Enable: record.Enable, Config: patch})
+		return err
+	})
 	if err := database.MarkInterruptedTaskRecords(a.ctx); err != nil {
 		log.Errorf("Failed to mark interrupted tasks: %v", err)
 	}

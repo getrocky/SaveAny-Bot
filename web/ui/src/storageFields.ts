@@ -129,8 +129,30 @@ export const storageTypeDefs: StorageTypeDef[] = [
       },
       { name: 'rate_burst', label: 'storages.fields.rateBurst', kind: 'number' },
       { name: 'skip_large', label: 'storages.fields.skipLarge', kind: 'bool', hint: 'storages.fields.skipLargeHint' },
-      { name: 'split_large_video', label: 'storages.fields.splitVideo', kind: 'bool' },
-      { name: 'split_size_mb', label: 'storages.fields.splitSize', kind: 'number' },
+      {
+        name: 'split_large_video',
+        label: 'storages.fields.splitVideo',
+        kind: 'bool',
+        hint: 'storages.fields.splitVideoHint',
+      },
+      {
+        name: 'split_mode',
+        label: 'storages.fields.splitMode',
+        kind: 'text',
+        hint: 'storages.fields.splitModeHint',
+      },
+      {
+        name: 'split_duration_sec',
+        label: 'storages.fields.splitDuration',
+        kind: 'number',
+        hint: 'storages.fields.splitDurationHint',
+      },
+      {
+        name: 'split_size_mb',
+        label: 'storages.fields.splitSize',
+        kind: 'number',
+        hint: 'storages.fields.splitSizeHint',
+      },
       {
         name: 'use_metadata_caption',
         label: 'storages.fields.useMetadataCaption',

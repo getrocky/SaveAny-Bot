@@ -84,11 +84,13 @@ chat_id = "-1001234567890" # Bot API 聊天 ID（用户为正数，普通群为�
 force_file = false
 # 是否跳过大文件, 默认为 false. 如果启用, 超过 Telegram 限制的文件将不会上传.
 skip_large = false
-# 超限视频是否使用 FFmpeg 分割为单组（最多 10 个）独立播放的小视频；失败或超过 10 段时回退为 ZIP 分卷.
+# 是否按时长用 FFmpeg 无损切成可播放小段并回传（多段按相册顺序发送）。需要 ffmpeg/ffprobe。
+# 开启后回传切片，不再回传整段原片。
 split_large_video = false
-# 分卷大小, 单位 MB. 设为 0 时使用实际上传账号的限制：Bot/普通用户为 2000 MB，Premium 用户为 4000 MB.
-# 超过该大小的文件将被分割成多个部分上传；非视频使用 ZIP 格式.
-# 当 skip_large 启用时, 该选项无效.
+# 每段目标时长（秒）。0 表示默认 120 秒（约 2 分钟）。与文件大小无关。
+split_duration_sec = 120
+# 超限文件 ZIP 分卷大小 (MB)。仅用于超过 Telegram 上传上限时的 ZIP 分卷，与视频时长切片无关。
+# 0 表示使用账号上传上限。skip_large 启用时无效。
 split_size_mb = 0
 # 没有实时 caption 时，用元数据中的消息文本作为发送 caption
 use_metadata_caption = false

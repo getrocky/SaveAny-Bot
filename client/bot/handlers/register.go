@@ -63,6 +63,8 @@ func Register(disp dispatcher.Dispatcher) {
 	for _, info := range CommandHandlers {
 		disp.AddHandler(handlers.NewCommand(info.Cmd, info.handler))
 	}
+	// Pending「视频切片」value input (seconds or MB) from the /config menu.
+	disp.AddHandler(handlers.NewMessage(filters.Message.Text, handleVideoSplitInput))
 	// Group chats only react to explicit commands and callback buttons. Plain
 	// messages would otherwise save every album or link posted in the group
 	// once privacy mode is disabled.

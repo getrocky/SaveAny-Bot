@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,39 +10,20 @@ import (
 	"testing"
 
 	"github.com/gotd/td/telegram/uploader"
+
+	"github.com/krau/SaveAny-Bot/pkg/consts/tglimit"
 )
 
-func TestInitialSegmentDuration(t *testing.T) {
-	tests := []struct {
-		name       string
-		duration   float64
-		fileSize   int64
-		targetSize int64
-		want       float64
-	}{
-		{name: "two balanced parts", duration: 120, fileSize: 2200, targetSize: 1900, want: 60},
-		{name: "three balanced parts", duration: 120, fileSize: 3900, targetSize: 1900, want: 40},
-		{name: "minimum one second", duration: 1.5, fileSize: 3900, targetSize: 1900, want: 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := initialSegmentDuration(tt.duration, tt.fileSize, tt.targetSize)
-			if got != tt.want {
-				t.Fatalf("initialSegmentDuration() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestVideoPartExtension(t *testing.T) {
-	tests := map[string]string{
-		"clip.MOV": ".mov",
-		"clip.mkv": ".mkv",
-		"clip.exe": ".mp4",
-		"clip":     ".mp4",
+	cases := map[string]string{
+		"clip.MP4":  ".mp4",
+		"clip.mov":  ".mov",
+		"clip.mkv":  ".mkv",
+		"clip.webm": ".webm",
+		"clip.bin":  ".mp4",
+		"clip":      ".mp4",
 	}
-	for input, want := range tests {
+	for input, want := range cases {
 		if got := videoPartExtension(input); got != want {
 			t.Fatalf("videoPartExtension(%q) = %q, want %q", input, got, want)
 		}
@@ -49,33 +31,41 @@ func TestVideoPartExtension(t *testing.T) {
 }
 
 func TestPartStoragePath(t *testing.T) {
-	tests := map[string]string{
-		"clip.mov":            "clip.part001.mov",
-		"123456/clip.mov":     "123456/clip.part001.mov",
-		"/123456/clip.mov":    "/123456/clip.part001.mov",
-		"folder/sub/clip.mov": "folder/sub/clip.part001.mov",
+	cases := map[string]string{
+		"video.mp4":          "part.mp4",
+		"/chat/video.mp4":    "/chat/part.mp4",
+		"chat/dir/video.mp4": "chat/dir/part.mp4",
 	}
-	for input, want := range tests {
-		if got := partStoragePath(input, "clip.part001.mov"); got != want {
+	for input, want := range cases {
+		got := partStoragePath(input, "part.mp4")
+		if got != want {
 			t.Fatalf("partStoragePath(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
 
 func TestVideoPartCaption(t *testing.T) {
-	if got := videoPartCaption(nil, 0); got != nil {
-		t.Fatalf("caption without source = %q, want nil", *got)
+	if got := videoPartCaption(nil, 0, 3); got == nil || *got != "(1/3)" {
+		t.Fatalf("caption without source = %v, want (1/3)", got)
 	}
 
 	source := "original caption"
-	first := videoPartCaption(&source, 0)
-	if first == nil || *first != source {
-		t.Fatalf("first part caption = %v, want %q", first, source)
+	first := videoPartCaption(&source, 0, 3)
+	wantFirst := "original caption\n(1/3)"
+	if first == nil || *first != wantFirst {
+		t.Fatalf("first part caption = %q, want %q", deref(first), wantFirst)
 	}
-	second := videoPartCaption(&source, 1)
-	if second == nil || *second != "" {
-		t.Fatalf("second part caption = %v, want an explicit empty caption", second)
+	second := videoPartCaption(&source, 1, 3)
+	if second == nil || *second != "(2/3)" {
+		t.Fatalf("second part caption = %v, want (2/3)", second)
 	}
+}
+
+func deref(v *string) string {
+	if v == nil {
+		return "<nil>"
+	}
+	return *v
 }
 
 func TestResetLosslessVideoUploadProgressUsesCombinedPartSize(t *testing.T) {
@@ -97,7 +87,16 @@ func TestResetLosslessVideoUploadProgressUsesCombinedPartSize(t *testing.T) {
 	}
 }
 
-func TestSplitLosslessVideoRetriesOversizedPart(t *testing.T) {
+func TestVideoSplitDurationSecDefault(t *testing.T) {
+	if got := videoSplitDurationSec(0); got != 120 {
+		t.Fatalf("default = %v, want 120", got)
+	}
+	if got := videoSplitDurationSec(90); got != 90 {
+		t.Fatalf("custom = %v, want 90", got)
+	}
+}
+
+func TestSplitVideoByDuration(t *testing.T) {
 	tempDir := t.TempDir()
 	inputPath := filepath.Join(tempDir, "source.mov")
 	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
@@ -110,21 +109,20 @@ func TestSplitLosslessVideoRetriesOversizedPart(t *testing.T) {
 
 	originalRunner := runMediaTool
 	t.Cleanup(func() { runMediaTool = originalRunner })
-	ffmpegCalls := 0
 	runMediaTool = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
 		case "ffprobe":
-			return []byte("120.0\n"), nil
+			return []byte("300.0\n"), nil
 		case "ffmpeg":
-			ffmpegCalls++
-			pattern := args[len(args)-1]
-			sizes := []int{2001, 199}
-			if ffmpegCalls > 1 {
-				sizes = []int{1100, 1100}
+			// ensure segment_time is the configured duration
+			joined := strings.Join(args, " ")
+			if !strings.Contains(joined, "-segment_time 120.000") {
+				return nil, fmt.Errorf("missing segment_time 120 in %v", args)
 			}
-			for index, size := range sizes {
+			pattern := args[len(args)-1]
+			for index := range 3 {
 				partPath := strings.Replace(pattern, "%03d", fmt.Sprintf("%03d", index+1), 1)
-				if err := os.WriteFile(partPath, make([]byte, size), 0o600); err != nil {
+				if err := os.WriteFile(partPath, make([]byte, 100), 0o600); err != nil {
 					return nil, err
 				}
 			}
@@ -134,27 +132,86 @@ func TestSplitLosslessVideoRetriesOversizedPart(t *testing.T) {
 		}
 	}
 
-	parts, err := splitLosslessVideo(t.Context(), inputPath, outputDir, "example.mov", 2200, 2000)
+	parts, err := splitVideoByDuration(t.Context(), inputPath, outputDir, "example.mov", 120)
 	if err != nil {
-		t.Fatalf("splitLosslessVideo() failed: %v", err)
+		t.Fatalf("splitVideoByDuration() failed: %v", err)
 	}
-	if ffmpegCalls != 2 {
-		t.Fatalf("ffmpeg calls = %d, want 2", ffmpegCalls)
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3", len(parts))
 	}
-	if len(parts) != 2 {
-		t.Fatalf("parts = %d, want 2", len(parts))
-	}
-	if parts[0].Name != "example.part001.mov" || parts[1].Name != "example.part002.mov" {
-		t.Fatalf("unexpected part names: %#v", parts)
-	}
-	for _, part := range parts {
-		if part.Size > 2000 {
-			t.Fatalf("part %s exceeds limit: %d", part.Name, part.Size)
-		}
+	if parts[0].Name != "example.part001.mov" {
+		t.Fatalf("unexpected first part name: %s", parts[0].Name)
 	}
 }
 
-func TestSplitLosslessVideoRejectsMultipleAlbums(t *testing.T) {
+func TestSplitVideoByDurationSkipsShortVideo(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "source.mov")
+	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(tempDir, "parts")
+	if err := os.Mkdir(outputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRunner := runMediaTool
+	t.Cleanup(func() { runMediaTool = originalRunner })
+	runMediaTool = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "ffprobe" {
+			return []byte("90.0\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected media tool %q", name)
+	}
+
+	_, err := splitVideoByDuration(t.Context(), inputPath, outputDir, "example.mov", 120)
+	if !errors.Is(err, errVideoShorterThanSegment) {
+		t.Fatalf("error = %v, want errVideoShorterThanSegment", err)
+	}
+}
+
+func TestSplitVideoByDurationAllowsMultipleAlbums(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "source.mov")
+	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(tempDir, "parts")
+	if err := os.Mkdir(outputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRunner := runMediaTool
+	t.Cleanup(func() { runMediaTool = originalRunner })
+	partCount := tglimit.MaxAlbumItems + 3
+	runMediaTool = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		switch name {
+		case "ffprobe":
+			return []byte("3600.0\n"), nil
+		case "ffmpeg":
+			pattern := args[len(args)-1]
+			for index := range partCount {
+				partPath := strings.Replace(pattern, "%03d", fmt.Sprintf("%03d", index+1), 1)
+				if err := os.WriteFile(partPath, make([]byte, 100), 0o600); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected media tool %q", name)
+		}
+	}
+
+	parts, err := splitVideoByDuration(t.Context(), inputPath, outputDir, "example.mov", 120)
+	if err != nil {
+		t.Fatalf("splitVideoByDuration() failed for multi-album parts: %v", err)
+	}
+	if len(parts) != partCount {
+		t.Fatalf("parts = %d, want %d", len(parts), partCount)
+	}
+}
+
+func TestSplitVideoByDurationRejectsExcessiveParts(t *testing.T) {
 	tempDir := t.TempDir()
 	inputPath := filepath.Join(tempDir, "source.mov")
 	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
@@ -170,7 +227,7 @@ func TestSplitLosslessVideoRejectsMultipleAlbums(t *testing.T) {
 	runMediaTool = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
 		case "ffprobe":
-			return []byte("120.0\n"), nil
+			return []byte("99999.0\n"), nil
 		case "ffmpeg":
 			pattern := args[len(args)-1]
 			for index := range maxLosslessVideoParts + 1 {
@@ -185,11 +242,31 @@ func TestSplitLosslessVideoRejectsMultipleAlbums(t *testing.T) {
 		}
 	}
 
-	_, err := splitLosslessVideo(t.Context(), inputPath, outputDir, "example.mov", 2200, 2000)
+	_, err := splitVideoByDuration(t.Context(), inputPath, outputDir, "example.mov", 120)
 	if err == nil {
-		t.Fatal("splitLosslessVideo() succeeded with more than one album of parts")
+		t.Fatal("splitVideoByDuration() succeeded beyond maxLosslessVideoParts")
 	}
-	if !strings.Contains(err.Error(), "single-album limit") {
-		t.Fatalf("splitLosslessVideo() error = %q, want single-album limit", err)
+	if !strings.Contains(err.Error(), "configured limit") {
+		t.Fatalf("splitVideoByDuration() error = %q, want configured limit", err)
+	}
+}
+
+func TestLooksLikeVideo(t *testing.T) {
+	cases := []struct {
+		mime, name string
+		want       bool
+	}{
+		{"video/mp4", "x.bin", true},
+		{"application/octet-stream", "clip.mp4", true},
+		{"application/octet-stream", "CLIP.MOV", true},
+		{"image/jpeg", "a.jpg", false},
+		{"application/pdf", "a.pdf", false},
+		{"", "movie.mkv", true},
+		{"", "noext", false},
+	}
+	for _, tc := range cases {
+		if got := looksLikeVideo(tc.mime, tc.name); got != tc.want {
+			t.Fatalf("looksLikeVideo(%q,%q)=%v want %v", tc.mime, tc.name, got, tc.want)
+		}
 	}
 }

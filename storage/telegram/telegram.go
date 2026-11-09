@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -64,6 +66,56 @@ type batchMediaItem struct {
 }
 
 type primaryUploadContextKey struct{}
+
+type telegramUploadLockKey struct{}
+
+// telegramChatUploadLocks serializes message sends per destination chat so that
+// concurrent workers cannot interleave another task's media into the middle of
+// a duration-split video (or a SaveBatch group).
+var telegramChatUploadLocks sync.Map // int64 -> *sync.Mutex
+
+func chatUploadLock(chatID int64) *sync.Mutex {
+	actual, _ := telegramChatUploadLocks.LoadOrStore(chatID, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+// heldUploadChats returns the chat IDs whose upload lock this context holds.
+func heldUploadChats(ctx context.Context) map[int64]struct{} {
+	held, _ := ctx.Value(telegramUploadLockKey{}).(map[int64]struct{})
+	return held
+}
+
+func withHeldUploadChat(ctx context.Context, chatID int64) context.Context {
+	prev := heldUploadChats(ctx)
+	next := make(map[int64]struct{}, len(prev)+1)
+	for id := range prev {
+		next[id] = struct{}{}
+	}
+	next[chatID] = struct{}{}
+	return context.WithValue(ctx, telegramUploadLockKey{}, next)
+}
+
+func (t *Telegram) withChatUploadLock(ctx context.Context, fn func(context.Context) error) error {
+	lockedCtx, unlock := t.LockTaskUploads(ctx)
+	defer unlock()
+	return fn(lockedCtx)
+}
+
+// TaskUploadLockKey identifies the per-chat upload lock used by this storage.
+func (t *Telegram) TaskUploadLockKey() int64 { return t.config.ChatID }
+
+// LockTaskUploads holds this storage's per-chat upload lock until the returned
+// function is called. Tasks hold it for their whole run so every file (and
+// every slice) of one task is sent contiguously and in order. Reentrant.
+func (t *Telegram) LockTaskUploads(ctx context.Context) (context.Context, func()) {
+	chatID := t.config.ChatID
+	if _, ok := heldUploadChats(ctx)[chatID]; ok {
+		return ctx, func() {}
+	}
+	mu := chatUploadLock(chatID)
+	mu.Lock()
+	return withHeldUploadChat(ctx, chatID), mu.Unlock
+}
 
 func (t *Telegram) Init(ctx context.Context, cfg storconfig.StorageConfig) error {
 	telegramConfig, ok := cfg.(*storconfig.TelegramStorageConfig)
@@ -137,7 +189,9 @@ func (t *Telegram) WriteMetadataSidecar(context.Context, string, []byte) error {
 }
 
 func (t *Telegram) Save(ctx context.Context, r io.Reader, storagePath string) error {
-	return t.save(ctx, r, storagePath, nil)
+	return t.withChatUploadLock(ctx, func(ctx context.Context) error {
+		return t.save(ctx, r, storagePath, nil)
+	})
 }
 
 // SaveWithProgress saves a file while reporting Telegram-confirmed upload
@@ -148,8 +202,10 @@ func (t *Telegram) SaveWithProgress(
 	storagePath string,
 	onProgress func(uploaded, total int64),
 ) error {
-	size := contentLength(ctx)
-	return t.save(ctx, r, storagePath, newUploadProgress(size, onProgress))
+	return t.withChatUploadLock(ctx, func(ctx context.Context) error {
+		size := contentLength(ctx)
+		return t.save(ctx, r, storagePath, newUploadProgress(size, onProgress))
+	})
 }
 
 func (t *Telegram) save(ctx context.Context, r io.Reader, storagePath string, progress *uploadProgress) error {
@@ -193,9 +249,21 @@ func (t *Telegram) saveWithContext(ctx context.Context, tctx *ext.Context, r io.
 		log.FromContext(ctx).Warnf("Skipping file larger than Telegram limit (%d bytes): %d bytes", maxUploadSize, size)
 		return nil
 	}
-	splitSize := t.splitSize(maxUploadSize)
-	if size > splitSize {
+
+	// Videos are sliced into playable video parts (by duration or by size),
+	// never ZIP volumes. Oversized videos are always sliced by size so they fit.
+	if rs, ok := r.(io.ReadSeeker); ok {
+		handled, err := t.trySliceVideo(ctx, tctx, rs, storagePath, size, maxUploadSize, captionOverride, progress)
+		if handled || err != nil {
+			return err
+		}
+	}
+
+	if size > maxUploadSize {
 		filename, chatID := t.target(tctx, storagePath)
+		if looksLikeVideo("", filename) || looksLikeVideo("", storagePath) {
+			return fmt.Errorf("video exceeds Telegram upload limit (%d bytes) and cannot be sliced from a non-seekable source; refusing ZIP fallback", maxUploadSize)
+		}
 		if filename == "" {
 			if rs, ok := r.(io.ReadSeeker); ok {
 				mtype, err := mimetype.DetectReader(rs)
@@ -216,43 +284,8 @@ func (t *Telegram) saveWithContext(ctx context.Context, tctx *ext.Context, r io.
 		if err := t.limiter.Wait(ctx); err != nil {
 			return fmt.Errorf("rate limit failed: %w", err)
 		}
-		if t.config.SplitLargeVideo {
-			rs, ok := r.(io.ReadSeeker)
-			if ok {
-				mtype, detectErr := mimetype.DetectReader(rs)
-				if _, seekErr := rs.Seek(0, io.SeekStart); seekErr != nil {
-					return fmt.Errorf("failed to seek large file after mimetype detection: %w", seekErr)
-				}
-				if detectErr != nil {
-					log.FromContext(ctx).Warnf("Failed to detect large file type, falling back to ZIP split: %s", detectErr)
-				} else if strings.HasPrefix(mtype.String(), "video/") {
-					parts, cleanup, splitErr := createLosslessVideoParts(
-						ctx,
-						rs,
-						filename,
-						size,
-						splitSize,
-					)
-					if splitErr != nil {
-						if ctx.Err() != nil {
-							return ctx.Err()
-						}
-						log.FromContext(ctx).Warnf("Lossless video split failed, falling back to ZIP split: %s", splitErr)
-					} else {
-						defer cleanup()
-						log.FromContext(ctx).Infof("Uploading oversized video as %d lossless-playable parts", len(parts))
-						for _, part := range parts {
-							log.FromContext(ctx).Infof("Prepared lossless video part %s (%d bytes)", part.Name, part.Size)
-						}
-						return t.uploadLosslessVideoParts(ctx, tctx, storagePath, parts, captionOverride, progress)
-					}
-					if _, seekErr := rs.Seek(0, io.SeekStart); seekErr != nil {
-						return fmt.Errorf("failed to seek large video before ZIP fallback: %w", seekErr)
-					}
-				}
-			}
-		}
-		return t.splitUpload(ctx, tctx, r, filename, upler, peer, size, splitSize, progress)
+		// Non-video files above the hard Telegram limit can only be sent as ZIP volumes.
+		return t.splitUpload(ctx, tctx, r, filename, upler, peer, size, maxUploadSize, progress)
 	}
 
 	if err := t.limiter.Wait(ctx); err != nil {
@@ -267,6 +300,95 @@ func (t *Telegram) saveWithContext(ctx context.Context, tctx *ext.Context, r io.
 		To(prepared.peer).
 		Media(ctx, prepared.media)
 	return err
+}
+
+// trySliceVideo slices a video into playable parts when slicing is enabled or
+// the video is larger than the upload limit. handled=false means the caller
+// should upload the original file. Slicing errors are returned as-is: there is
+// no silent fallback to ZIP volumes or the original file.
+func (t *Telegram) trySliceVideo(
+	ctx context.Context,
+	tctx *ext.Context,
+	rs io.ReadSeeker,
+	storagePath string,
+	size, maxUploadSize int64,
+	captionOverride *string,
+	progress *uploadProgress,
+) (bool, error) {
+	if size < 0 {
+		if end, err := rs.Seek(0, io.SeekEnd); err == nil {
+			size = end
+		}
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return false, fmt.Errorf("failed to seek video source: %w", err)
+		}
+	}
+	enabled := t.config.SplitLargeVideo
+	if !enabled && size <= maxUploadSize {
+		return false, nil
+	}
+	filename, _ := t.target(tctx, storagePath)
+	mtype, detectErr := mimetype.DetectReader(rs)
+	if _, seekErr := rs.Seek(0, io.SeekStart); seekErr != nil {
+		return false, fmt.Errorf("failed to seek after mimetype detection: %w", seekErr)
+	}
+	mimeType := ""
+	if detectErr != nil {
+		log.FromContext(ctx).Warnf("Failed to detect file type before video split: %s", detectErr)
+	} else {
+		mimeType = mtype.String()
+	}
+	if !looksLikeVideo(mimeType, filename) && !looksLikeVideo(mimeType, storagePath) {
+		log.FromContext(ctx).Debugf("Video split skipped: not a video (mime=%q name=%q)", mimeType, filename)
+		return false, nil
+	}
+
+	mode := t.config.EffectiveSplitMode()
+	partLimit := maxUploadSize
+	switch {
+	case !enabled:
+		mode = storconfig.SplitModeSize
+	case mode == storconfig.SplitModeSize:
+		partLimit = t.splitSize(maxUploadSize)
+		if size >= 0 && size <= partLimit {
+			return false, nil
+		}
+	}
+	if filename == "" {
+		if mtype != nil && mtype.Extension() != "" {
+			filename = xid.New().String() + mtype.Extension()
+		} else {
+			filename = xid.New().String() + videoPartExtension(storagePath)
+		}
+	}
+	if mode == storconfig.SplitModeSize {
+		log.FromContext(ctx).Infof("Size-slicing video %s (mime=%q, max part=%d bytes)", filename, mimeType, partLimit)
+	} else {
+		log.FromContext(ctx).Infof("Duration-slicing video %s (mime=%q, segment=%ds)", filename, mimeType, int(videoSplitDurationSec(t.config.SplitDurationSec)))
+	}
+	if err := t.limiter.Wait(ctx); err != nil {
+		return true, fmt.Errorf("rate limit failed: %w", err)
+	}
+	parts, cleanup, err := createVideoParts(ctx, rs, filename, mode, t.config.SplitDurationSec, partLimit)
+	if err != nil {
+		if ctx.Err() != nil {
+			return true, ctx.Err()
+		}
+		if errors.Is(err, errVideoShorterThanSegment) || errors.Is(err, errVideoWithinSizeLimit) {
+			if _, seekErr := rs.Seek(0, io.SeekStart); seekErr != nil {
+				return true, fmt.Errorf("failed to seek video after split check: %w", seekErr)
+			}
+			log.FromContext(ctx).Infof("Video fits in one part, uploading original")
+			return false, nil
+		}
+		return true, fmt.Errorf("video slicing failed (no ZIP or original fallback): %w", err)
+	}
+	defer cleanup()
+	log.FromContext(ctx).Infof("Uploading video as %d parts", len(parts))
+	for _, part := range parts {
+		log.FromContext(ctx).Infof("Prepared video part %s (%d bytes)", part.Name, part.Size)
+	}
+	return true, t.uploadLosslessVideoParts(ctx, tctx, storagePath, parts, captionOverride, progress)
 }
 
 // uploadContext picks a helper that can resolve the target path with the same
@@ -548,7 +670,9 @@ func (t *Telegram) prepareMedia(
 
 // SaveBatch preserves each source photo/video group as a Telegram album.
 func (t *Telegram) SaveBatch(ctx context.Context, items []storagetypes.BatchItem) error {
-	return t.saveBatch(ctx, items, nil)
+	return t.withChatUploadLock(ctx, func(ctx context.Context) error {
+		return t.saveBatch(ctx, items, nil)
+	})
 }
 
 // SaveBatchWithProgress preserves source media groups while reporting native
@@ -558,7 +682,9 @@ func (t *Telegram) SaveBatchWithProgress(
 	items []storagetypes.BatchItem,
 	onProgress func(index int, uploaded, total int64),
 ) error {
-	return t.saveBatch(ctx, items, onProgress)
+	return t.withChatUploadLock(ctx, func(ctx context.Context) error {
+		return t.saveBatch(ctx, items, onProgress)
+	})
 }
 
 func (t *Telegram) saveBatch(
@@ -610,12 +736,23 @@ func (t *Telegram) saveBatch(
 	return nil
 }
 
+func looksLikeVideo(mimeType, filename string) bool {
+	if strings.HasPrefix(mimeType, "video/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(filepath.Base(filename))) {
+	case ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ts", ".mpg", ".mpeg", ".flv", ".3gp":
+		return true
+	default:
+		return false
+	}
+}
+
 func (t *Telegram) inspectBatchItem(tctx *ext.Context, item storagetypes.BatchItem) (batchMediaItem, error) {
 	_, chatID := t.target(tctx, path.Clean(item.StoragePath))
 	result := batchMediaItem{item: item, chatID: chatID}
 	maxUploadSize := maxUploadFileSize(tctx)
-	if (t.config.SkipLarge && item.Size > maxUploadSize) ||
-		item.Size > t.splitSize(maxUploadSize) {
+	if item.Size > maxUploadSize {
 		result.useSingleSave = true
 		return result, nil
 	}
@@ -630,6 +767,13 @@ func (t *Telegram) inspectBatchItem(tctx *ext.Context, item storagetypes.BatchIt
 		return result, fmt.Errorf("failed to seek batch item: %w", err)
 	}
 	mtypeStr := mtype.String()
+	// Duration splitting lives on the single-file Save path. When enabled, route
+	// videos (including document uploads with video extensions) through Save so
+	// SaveBatch cannot bypass the split.
+	if t.config.SplitLargeVideo && looksLikeVideo(mtypeStr, item.StoragePath) {
+		result.useSingleSave = true
+		return result, nil
+	}
 	forceFile := t.config.ForceFile || strings.HasPrefix(mtypeStr, "image/") && item.Size >= tglimit.MaxPhotoSize
 	result.albumEligible = !forceFile && (strings.HasPrefix(mtypeStr, "video/") ||
 		strings.HasPrefix(mtypeStr, "image/") && mtypeStr != "image/webp" && mtypeStr != "image/gif")
