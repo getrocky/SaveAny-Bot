@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,6 +40,11 @@ func (t *Task) Execute(ctx context.Context) error {
 	if t.Progress != nil {
 		t.Progress.OnStart(ctx, t)
 	}
+	// Hold destination upload locks for the whole task so all files (and video
+	// slices) from one link are sent contiguously, never interleaved.
+	ctx, unlockUploads, ordered := lockTaskUploads(ctx, t.elems)
+	defer unlockUploads()
+	t.orderedUploads = ordered
 	groups := t.executionGroups()
 	var err error
 	for i := 0; i < len(groups); {
@@ -115,7 +121,12 @@ func (t *Task) executionGroups() []executionGroup {
 
 func (t *Task) processElements(ctx context.Context, elems []*TaskElement) error {
 	eg, gctx := errgroup.WithContext(ctx)
-	eg.SetLimit(config.C().Workers)
+	if t.orderedUploads {
+		// Keep upload order identical to source order.
+		eg.SetLimit(1)
+	} else {
+		eg.SetLimit(config.C().Workers)
+	}
 	for _, elem := range elems {
 		eg.Go(func() error {
 			if err := t.markProcessing(ctx, elem); err != nil {
@@ -502,4 +513,43 @@ func (t *Task) processElement(ctx context.Context, elem *TaskElement) error {
 		t.notifyStateChange(vctx)
 	}
 	return err
+}
+
+// taskUploadLocker is implemented by storages (Telegram) that must receive all
+// uploads of one task contiguously.
+type taskUploadLocker interface {
+	TaskUploadLockKey() int64
+	LockTaskUploads(ctx context.Context) (context.Context, func())
+}
+
+// lockTaskUploads acquires every distinct destination lock in key order (to
+// avoid lock-order deadlocks) and reports whether ordered uploads are needed.
+func lockTaskUploads(ctx context.Context, elems []TaskElement) (context.Context, func(), bool) {
+	byKey := map[int64]taskUploadLocker{}
+	for i := range elems {
+		if locker, ok := elems[i].Storage.(taskUploadLocker); ok {
+			if _, seen := byKey[locker.TaskUploadLockKey()]; !seen {
+				byKey[locker.TaskUploadLockKey()] = locker
+			}
+		}
+	}
+	if len(byKey) == 0 {
+		return ctx, func() {}, false
+	}
+	keys := make([]int64, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	unlocks := make([]func(), 0, len(keys))
+	for _, key := range keys {
+		var unlock func()
+		ctx, unlock = byKey[key].LockTaskUploads(ctx)
+		unlocks = append(unlocks, unlock)
+	}
+	return ctx, func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}, true
 }

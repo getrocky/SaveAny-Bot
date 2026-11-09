@@ -54,7 +54,15 @@ func NewTGFileTask(
 	metaJSON, metaVersion := buildFileMetadata(ctx, file)
 	_, ok := stor.(storage.StorageCannotStream)
 	if !config.C().Stream || ok {
-		cachePath, err := filepath.Abs(filepath.Join(config.C().Temp.BasePath, fmt.Sprintf("%s_%s", id, fsutil.SafeBaseName(file.Name()))))
+		// Cache files must stay under NAME_MAX (255). Resume bitmaps append
+		// ".part.bitmap", so never embed the full Telegram title here.
+		safe := fsutil.SafeBaseName(file.Name())
+		ext := filepath.Ext(safe)
+		if len(ext) > 16 || ext == "." {
+			ext = ""
+		}
+		cacheName := id + ext
+		cachePath, err := filepath.Abs(filepath.Join(config.C().Temp.BasePath, cacheName))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get absolute path for cache: %w", err)
 		}

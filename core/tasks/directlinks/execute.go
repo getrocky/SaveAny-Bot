@@ -130,8 +130,12 @@ func (t *Task) processLink(ctx context.Context, file *File) error {
 		if t.stream {
 			return t.Storage.Save(ctx, resp.Body, filepath.Join(t.StorPath, file.Name))
 		}
+		ext := filepath.Ext(file.Name)
+		if len(ext) > 16 || ext == "." {
+			ext = ""
+		}
 		cacheFile, err := fsutil.CreateFile(filepath.Join(config.C().Temp.BasePath,
-			fmt.Sprintf("direct_%s_%s", t.ID, file.Name)))
+			"direct_"+t.ID+ext))
 		if err != nil {
 			return fmt.Errorf("failed to create temp file: %w", err)
 		}

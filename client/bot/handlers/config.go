@@ -47,6 +47,7 @@ func configMenuMarkup() *tg.ReplyInlineMarkup {
 		}},
 		{Buttons: []tg.KeyboardInlineButton{
 			markup.Callback(i18n.T(i18nk.BotMsgConfigButtonTemplate), fmt.Appendf(nil, "%s template", tcbdata.TypeConfig)),
+			markup.Callback("🎬 视频切片", fmt.Appendf(nil, "%s vsplit", tcbdata.TypeConfig)),
 		}},
 	}}
 }
@@ -78,6 +79,8 @@ func handleConfigCallback(ctx *ext.Context, update *ext.Update) error {
 		return handleConfigStorageCallback(ctx, update)
 	case "template":
 		return handleConfigTemplateCallback(ctx, update)
+	case "vsplit":
+		return handleConfigVideoSplitCallback(ctx, update)
 	default:
 		return invaildDataAnswer()
 	}

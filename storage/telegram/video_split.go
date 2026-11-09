@@ -2,9 +2,9 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -19,14 +19,17 @@ import (
 	"github.com/rs/xid"
 
 	"github.com/krau/SaveAny-Bot/config"
+	storconfig "github.com/krau/SaveAny-Bot/config/storage"
 	"github.com/krau/SaveAny-Bot/pkg/consts/tglimit"
 )
 
 const (
-	videoPartTargetRatio  = 0.95
-	videoSplitAttempts    = 4
-	minSegmentDuration    = 1.0
-	maxLosslessVideoParts = tglimit.MaxAlbumItems
+	minSegmentDuration = 1.0
+	// defaultVideoSplitDurationSec is used when split_duration_sec is 0.
+	defaultVideoSplitDurationSec = 120
+	// maxLosslessVideoParts caps runaway splits for tiny durations.
+	// Parts are uploaded as sequential Telegram albums of MaxAlbumItems each.
+	maxLosslessVideoParts = 500
 )
 
 type losslessVideoPart struct {
@@ -50,11 +53,23 @@ var runMediaTool mediaToolRunner = func(ctx context.Context, name string, args .
 	return output, nil
 }
 
-func createLosslessVideoParts(
+func videoSplitDurationSec(configured int64) float64 {
+	if configured <= 0 {
+		return float64(defaultVideoSplitDurationSec)
+	}
+	return float64(configured)
+}
+
+// createVideoParts slices a video into playable parts. mode is "duration" or
+// "size". In duration mode, parts that still exceed maxPartBytes are re-split by
+// size so every part can be uploaded. It never produces ZIP volumes.
+func createVideoParts(
 	ctx context.Context,
 	r io.ReadSeeker,
 	filename string,
-	fileSize, maxPartSize int64,
+	mode string,
+	segmentSec int64,
+	maxPartBytes int64,
 ) ([]losslessVideoPart, func(), error) {
 	inputPath, sourceCleanup, err := sourceFile(r)
 	if err != nil {
@@ -62,6 +77,9 @@ func createLosslessVideoParts(
 	}
 
 	tempBase := config.C().Temp.BasePath
+	if tempBase == "" {
+		tempBase = os.TempDir()
+	}
 	if err := os.MkdirAll(tempBase, 0o755); err != nil {
 		sourceCleanup()
 		return nil, func() {}, fmt.Errorf("failed to create video split base directory: %w", err)
@@ -73,12 +91,26 @@ func createLosslessVideoParts(
 	}
 	cleanup := func() {
 		if err := os.RemoveAll(tempDir); err != nil {
-			log.FromContext(ctx).Warnf("Failed to clean lossless video parts: %s", err)
+			log.FromContext(ctx).Warnf("Failed to clean video parts: %s", err)
 		}
 		sourceCleanup()
 	}
 
-	parts, err := splitLosslessVideo(ctx, inputPath, tempDir, filename, fileSize, maxPartSize)
+	var parts []losslessVideoPart
+	if mode == storconfig.SplitModeSize {
+		parts, err = splitVideoBySize(ctx, inputPath, tempDir, filename, maxPartBytes)
+	} else {
+		parts, err = splitVideoByDuration(ctx, inputPath, tempDir, filename, videoSplitDurationSec(segmentSec))
+		if errors.Is(err, errVideoShorterThanSegment) && maxPartBytes > 0 {
+			if info, statErr := os.Stat(inputPath); statErr == nil && info.Size() > maxPartBytes {
+				// Short but too large to upload as one file: fall back to size slicing.
+				parts, err = splitVideoBySize(ctx, inputPath, tempDir, filename, maxPartBytes)
+			}
+		}
+		if err == nil && maxPartBytes > 0 {
+			parts, err = ensureVideoPartsUnder(ctx, parts, tempDir, filename, maxPartBytes)
+		}
+	}
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -86,16 +118,182 @@ func createLosslessVideoParts(
 	return parts, cleanup, nil
 }
 
-func splitLosslessVideo(
+// errVideoWithinSizeLimit means the source already fits in one part; caller
+// should upload the original file.
+var errVideoWithinSizeLimit = errors.New("video size does not exceed part size limit")
+
+const (
+	// sizeSplitSafety leaves headroom because stream-copy cuts happen on keyframes.
+	sizeSplitSafety   = 0.85
+	maxSizeSplitDepth = 3
+)
+
+// sizeSegmentDuration estimates the segment length that yields parts of at most
+// maxPartBytes for a file of the given size and duration.
+func sizeSegmentDuration(duration float64, size, maxPartBytes int64) float64 {
+	if size <= 0 || maxPartBytes <= 0 || duration <= 0 {
+		return 0
+	}
+	return duration * float64(maxPartBytes) / float64(size) * sizeSplitSafety
+}
+
+func splitVideoBySize(
 	ctx context.Context,
 	inputPath, outputDir, filename string,
-	fileSize, maxPartSize int64,
+	maxPartBytes int64,
 ) ([]losslessVideoPart, error) {
-	if fileSize <= maxPartSize {
-		return nil, fmt.Errorf("video size %d does not exceed part limit %d", fileSize, maxPartSize)
+	if maxPartBytes <= 0 {
+		return nil, fmt.Errorf("invalid video part size limit: %d", maxPartBytes)
 	}
-	if maxPartSize <= 0 {
-		return nil, fmt.Errorf("invalid video part limit: %d", maxPartSize)
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat source video: %w", err)
+	}
+	if info.Size() <= maxPartBytes {
+		return nil, errVideoWithinSizeLimit
+	}
+	duration, err := probeMediaDuration(ctx, inputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to probe source video duration: %w", err)
+	}
+	paths, err := splitVideoToFit(ctx, inputPath, filepath.Join(outputDir, "size"), filename, duration, info.Size(), maxPartBytes, 0)
+	if err != nil {
+		return nil, err
+	}
+	parts, err := buildVideoParts(ctx, paths, filename)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("video size split produced %d part(s), expected at least 2", len(parts))
+	}
+	if len(parts) > maxLosslessVideoParts {
+		return nil, fmt.Errorf("video split produced %d parts, exceeding the configured limit of %d", len(parts), maxLosslessVideoParts)
+	}
+	return parts, nil
+}
+
+// splitVideoToFit cuts inputPath into ordered parts no larger than maxPartBytes,
+// re-splitting any oversized part (long keyframe intervals) a few times.
+func splitVideoToFit(
+	ctx context.Context,
+	inputPath, outputDir, filename string,
+	duration float64,
+	size, maxPartBytes int64,
+	depth int,
+) ([]string, error) {
+	segmentDuration := sizeSegmentDuration(duration, size, maxPartBytes)
+	if segmentDuration < minSegmentDuration {
+		return nil, fmt.Errorf("cannot slice video into parts of %d bytes: segment would be %.3fs", maxPartBytes, segmentDuration)
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create video split directory: %w", err)
+	}
+	extension := videoPartExtension(filename)
+	var matches []string
+	// Stream-copy cuts only land on keyframes; if a pass yields a single
+	// oversized part, retry with shorter segments before giving up.
+	for attempt := 0; ; attempt++ {
+		if err := clearVideoParts(outputDir); err != nil {
+			return nil, err
+		}
+		if err := runFFmpegSegment(ctx, inputPath, filepath.Join(outputDir, "part-%03d"+extension), extension, segmentDuration); err != nil {
+			return nil, fmt.Errorf("failed to split video by size: %w", err)
+		}
+		found, err := filepath.Glob(filepath.Join(outputDir, "part-*"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to list video parts: %w", err)
+		}
+		sort.Strings(found)
+		if len(found) == 0 {
+			return nil, fmt.Errorf("ffmpeg did not produce any video parts")
+		}
+		matches = found
+		if len(found) > 1 || attempt >= 3 || segmentDuration/2 < minSegmentDuration {
+			break
+		}
+		segmentDuration /= 2
+	}
+	out := make([]string, 0, len(matches))
+	for index, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat video part %s: %w", match, err)
+		}
+		if info.Size() <= maxPartBytes {
+			out = append(out, match)
+			continue
+		}
+		if depth >= maxSizeSplitDepth || len(matches) == 1 {
+			return nil, fmt.Errorf("video part %s is still %d bytes (limit %d) after re-splitting; keyframe interval too long", filepath.Base(match), info.Size(), maxPartBytes)
+		}
+		partDuration, err := probeMediaDuration(ctx, match)
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe video part %s: %w", match, err)
+		}
+		children, err := splitVideoToFit(ctx, match, filepath.Join(outputDir, fmt.Sprintf("r%03d", index+1)), filename, partDuration, info.Size(), maxPartBytes, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, children...)
+	}
+	return out, nil
+}
+
+// ensureVideoPartsUnder re-splits any duration part larger than maxPartBytes.
+func ensureVideoPartsUnder(
+	ctx context.Context,
+	parts []losslessVideoPart,
+	outputDir, filename string,
+	maxPartBytes int64,
+) ([]losslessVideoPart, error) {
+	oversized := false
+	for _, part := range parts {
+		if part.Size > maxPartBytes {
+			oversized = true
+			break
+		}
+	}
+	if !oversized {
+		return parts, nil
+	}
+	paths := make([]string, 0, len(parts))
+	for index, part := range parts {
+		if part.Size <= maxPartBytes {
+			paths = append(paths, part.Path)
+			continue
+		}
+		duration, err := probeMediaDuration(ctx, part.Path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe video part %s: %w", part.Name, err)
+		}
+		children, err := splitVideoToFit(ctx, part.Path, filepath.Join(outputDir, fmt.Sprintf("fit%03d", index+1)), filename, duration, part.Size, maxPartBytes, 1)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, children...)
+	}
+	result, err := buildVideoParts(ctx, paths, filename)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > maxLosslessVideoParts {
+		return nil, fmt.Errorf("video split produced %d parts, exceeding the configured limit of %d", len(result), maxLosslessVideoParts)
+	}
+	return result, nil
+}
+
+// errVideoShorterThanSegment means the source fits in one segment; caller should
+// upload the original file instead of parts.
+var errVideoShorterThanSegment = errors.New("video duration does not exceed segment duration")
+
+func splitVideoByDuration(
+	ctx context.Context,
+	inputPath, outputDir, filename string,
+	segmentDuration float64,
+) ([]losslessVideoPart, error) {
+	if segmentDuration < minSegmentDuration {
+		return nil, fmt.Errorf("invalid video segment duration: %.3f", segmentDuration)
 	}
 
 	duration, err := probeMediaDuration(ctx, inputPath)
@@ -105,63 +303,35 @@ func splitLosslessVideo(
 	if duration < minSegmentDuration {
 		return nil, fmt.Errorf("invalid source video duration: %.3f", duration)
 	}
+	// Allow a tiny probe epsilon so e.g. 120.01s still splits when segment is 120.
+	if duration <= segmentDuration+0.05 {
+		return nil, errVideoShorterThanSegment
+	}
 
-	targetSize := int64(float64(maxPartSize) * videoPartTargetRatio)
-	segmentDuration := initialSegmentDuration(duration, fileSize, targetSize)
 	extension := videoPartExtension(filename)
 	outputPattern := filepath.Join(outputDir, "part-%03d"+extension)
-
-	var lastOversize int64
-	for range videoSplitAttempts {
-		if err := clearVideoParts(outputDir); err != nil {
-			return nil, err
-		}
-		if err := runFFmpegSegment(ctx, inputPath, outputPattern, extension, segmentDuration); err != nil {
-			return nil, fmt.Errorf("failed to losslessly split video: %w", err)
-		}
-
-		parts, largest, err := collectVideoParts(ctx, outputDir, filename)
-		if err != nil {
-			return nil, err
-		}
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("video split produced %d part(s), expected at least 2", len(parts))
-		}
-		if len(parts) > maxLosslessVideoParts {
-			return nil, fmt.Errorf(
-				"video split produced %d parts, exceeding the single-album limit of %d",
-				len(parts),
-				maxLosslessVideoParts,
-			)
-		}
-		if largest <= maxPartSize {
-			return parts, nil
-		}
-
-		lastOversize = largest
-		segmentDuration *= float64(targetSize) / float64(largest)
-		if segmentDuration < minSegmentDuration {
-			break
-		}
+	if err := clearVideoParts(outputDir); err != nil {
+		return nil, err
+	}
+	if err := runFFmpegSegment(ctx, inputPath, outputPattern, extension, segmentDuration); err != nil {
+		return nil, fmt.Errorf("failed to split video by duration: %w", err)
 	}
 
-	return nil, fmt.Errorf(
-		"unable to keep lossless video parts below %d bytes; largest part was %d bytes",
-		maxPartSize,
-		lastOversize,
-	)
-}
-
-func initialSegmentDuration(duration float64, fileSize, targetSize int64) float64 {
-	partCount := math.Ceil(float64(fileSize) / float64(targetSize))
-	if partCount < 2 {
-		partCount = 2
+	parts, _, err := collectVideoParts(ctx, outputDir, filename)
+	if err != nil {
+		return nil, err
 	}
-	segmentDuration := duration / partCount
-	if segmentDuration < minSegmentDuration {
-		return minSegmentDuration
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("video split produced %d part(s), expected at least 2", len(parts))
 	}
-	return segmentDuration
+	if len(parts) > maxLosslessVideoParts {
+		return nil, fmt.Errorf(
+			"video split produced %d parts, exceeding the configured limit of %d",
+			len(parts),
+			maxLosslessVideoParts,
+		)
+	}
+	return parts, nil
 }
 
 func videoPartExtension(filename string) string {
@@ -249,27 +419,35 @@ func collectVideoParts(
 	if len(matches) == 0 {
 		return nil, 0, fmt.Errorf("ffmpeg did not produce any video parts")
 	}
+	parts, err := buildVideoParts(ctx, matches, filename)
+	if err != nil {
+		return nil, 0, err
+	}
+	var largest int64
+	for _, part := range parts {
+		largest = max(largest, part.Size)
+	}
+	return parts, largest, nil
+}
 
+// buildVideoParts validates ordered part files and names them sequentially.
+func buildVideoParts(ctx context.Context, paths []string, filename string) ([]losslessVideoPart, error) {
 	extension := videoPartExtension(filename)
 	base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filepath.Base(filename)))
 	if base == "" || base == "." {
 		base = xid.New().String()
 	}
-	parts := make([]losslessVideoPart, 0, len(matches))
-	var largest int64
-	for index, match := range matches {
+	parts := make([]losslessVideoPart, 0, len(paths))
+	for index, match := range paths {
 		info, err := os.Stat(match)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to stat video part %s: %w", match, err)
+			return nil, fmt.Errorf("failed to stat video part %s: %w", match, err)
 		}
 		if info.Size() <= 0 {
-			return nil, 0, fmt.Errorf("video part %s is empty", match)
+			return nil, fmt.Errorf("video part %s is empty", match)
 		}
 		if _, err := probeMediaDuration(ctx, match); err != nil {
-			return nil, 0, fmt.Errorf("failed to validate video part %s: %w", match, err)
-		}
-		if info.Size() > largest {
-			largest = info.Size()
+			return nil, fmt.Errorf("failed to validate video part %s: %w", match, err)
 		}
 		parts = append(parts, losslessVideoPart{
 			Path: match,
@@ -277,7 +455,7 @@ func collectVideoParts(
 			Size: info.Size(),
 		})
 	}
-	return parts, largest, nil
+	return parts, nil
 }
 
 func partStoragePath(storagePath, partName string) string {
@@ -301,51 +479,58 @@ func (t *Telegram) uploadLosslessVideoParts(
 	}
 	if len(parts) > maxLosslessVideoParts {
 		return fmt.Errorf(
-			"refusing to upload %d lossless video parts as multiple albums; maximum is %d",
+			"refusing to upload %d lossless video parts; maximum is %d",
 			len(parts),
 			maxLosslessVideoParts,
 		)
 	}
 	resetLosslessVideoUploadProgress(progress, parts)
 
-	prepared := make([]preparedMedia, 0, len(parts))
-	for index, part := range parts {
-		partFile, err := os.Open(part.Path)
-		if err != nil {
-			return fmt.Errorf("failed to open video part %s: %w", part.Name, err)
+	// Prepare and send one album (≤ MaxAlbumItems) at a time so part order stays
+	// contiguous and we do not buffer every upload before the first send.
+	for i := 0; i < len(parts); i += tglimit.MaxAlbumItems {
+		end := min(i+tglimit.MaxAlbumItems, len(parts))
+		batchParts := parts[i:end]
+		prepared := make([]preparedMedia, 0, len(batchParts))
+		for offset, part := range batchParts {
+			index := i + offset
+			partFile, err := os.Open(part.Path)
+			if err != nil {
+				return fmt.Errorf("failed to open video part %s: %w", part.Name, err)
+			}
+			media, prepareErr := t.prepareMedia(
+				ctx,
+				tctx,
+				partFile,
+				partStoragePath(storagePath, part.Name),
+				part.Size,
+				videoPartCaption(sourceCaption, index, len(parts)),
+				progress,
+			)
+			closeErr := partFile.Close()
+			if prepareErr != nil {
+				return fmt.Errorf("failed to prepare video part %s: %w", part.Name, prepareErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("failed to close video part %s: %w", part.Name, closeErr)
+			}
+			prepared = append(prepared, *media)
 		}
-		media, prepareErr := t.prepareMedia(
-			ctx,
-			tctx,
-			partFile,
-			partStoragePath(storagePath, part.Name),
-			part.Size,
-			videoPartCaption(sourceCaption, index),
-			progress,
-		)
-		closeErr := partFile.Close()
-		if prepareErr != nil {
-			return fmt.Errorf("failed to prepare video part %s: %w", part.Name, prepareErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("failed to close video part %s: %w", part.Name, closeErr)
-		}
-		prepared = append(prepared, *media)
-	}
 
-	builder := tctx.Sender.WithUploader(prepared[0].uploader).To(prepared[0].peer)
-	if len(prepared) == 1 {
-		if _, err := builder.Media(ctx, prepared[0].media); err != nil {
-			return fmt.Errorf("failed to send video part: %w", err)
+		builder := tctx.Sender.WithUploader(prepared[0].uploader).To(prepared[0].peer)
+		if len(prepared) == 1 {
+			if _, err := builder.Media(ctx, prepared[0].media); err != nil {
+				return fmt.Errorf("failed to send video part %d: %w", i+1, err)
+			}
+			continue
 		}
-		return nil
-	}
-	media := make([]message.MultiMediaOption, len(prepared))
-	for index := range prepared {
-		media[index] = prepared[index].media
-	}
-	if _, err := builder.Album(ctx, media[0], media[1:]...); err != nil {
-		return fmt.Errorf("failed to send video parts as album: %w", err)
+		media := make([]message.MultiMediaOption, len(prepared))
+		for index := range prepared {
+			media[index] = prepared[index].media
+		}
+		if _, err := builder.Album(ctx, media[0], media[1:]...); err != nil {
+			return fmt.Errorf("failed to send video parts album starting at %d: %w", i+1, err)
+		}
 	}
 	return nil
 }
@@ -361,13 +546,14 @@ func resetLosslessVideoUploadProgress(progress *uploadProgress, parts []lossless
 	progress.reset(total)
 }
 
-func videoPartCaption(sourceCaption *string, index int) *string {
-	if sourceCaption == nil {
-		return nil
+func videoPartCaption(sourceCaption *string, index, total int) *string {
+	marker := fmt.Sprintf("(%d/%d)", index+1, total)
+	if sourceCaption == nil || strings.TrimSpace(*sourceCaption) == "" {
+		return &marker
 	}
 	if index == 0 {
-		return sourceCaption
+		combined := strings.TrimSpace(*sourceCaption) + "\n" + marker
+		return &combined
 	}
-	empty := ""
-	return &empty
+	return &marker
 }

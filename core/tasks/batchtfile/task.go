@@ -43,6 +43,7 @@ type Task struct {
 	Done            []string
 	ctx             context.Context
 	elems           []TaskElement
+	orderedUploads  bool
 	Progress        ProgressTracker
 	IgnoreErrors    bool
 	downloaded      atomic.Int64
@@ -84,7 +85,12 @@ func NewTaskElementWithID(
 	groupKey, caption, preserveCaption := sourceMetadata(file)
 	_, ok := stor.(storage.StorageCannotStream)
 	if !config.C().Stream || ok {
-		cachePath, err := filepath.Abs(filepath.Join(config.C().Temp.BasePath, fmt.Sprintf("%s_%s", id, fsutil.SafeBaseName(file.Name()))))
+		safe := fsutil.SafeBaseName(file.Name())
+		ext := filepath.Ext(safe)
+		if len(ext) > 16 || ext == "." {
+			ext = ""
+		}
+		cachePath, err := filepath.Abs(filepath.Join(config.C().Temp.BasePath, id+ext))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get absolute path for cache: %w", err)
 		}

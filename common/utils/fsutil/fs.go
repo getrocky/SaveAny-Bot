@@ -70,6 +70,28 @@ func SafeBaseName(name string) string {
 	case "", ".", "..":
 		return "file"
 	}
+	const maxBytes = 180
+	b := []byte(name)
+	if len(b) <= maxBytes {
+		return name
+	}
+	ext := path.Ext(name)
+	stemBudget := maxBytes - len([]byte(ext))
+	if stemBudget < 16 {
+		stemBudget = maxBytes
+		ext = ""
+	}
+	stem := []byte(strings.TrimSuffix(name, ext))
+	if len(stem) > stemBudget {
+		stem = stem[:stemBudget]
+		for len(stem) > 0 && stem[len(stem)-1]&0xc0 == 0x80 {
+			stem = stem[:len(stem)-1]
+		}
+	}
+	name = string(stem) + ext
+	if name == "" || name == ext {
+		return "file" + ext
+	}
 	return name
 }
 

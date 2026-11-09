@@ -98,8 +98,12 @@ func (t *Task) processResource(ctx context.Context, resource parser.Resource) er
 		if t.stream {
 			return t.Stor.Save(ctx, resp.Body, path.Join(t.StorPath, filename))
 		}
+		ext := filepath.Ext(filename)
+		if len(ext) > 16 || ext == "." {
+			ext = ""
+		}
 		cacheFile, err := fsutil.CreateFile(filepath.Join(config.C().Temp.BasePath,
-			fmt.Sprintf("resource_%s_%s", t.ID, filename)))
+			"resource_"+t.ID+ext))
 		if err != nil {
 			return fmt.Errorf("failed to create cache file for resource %s: %w", resource.URL, err)
 		}

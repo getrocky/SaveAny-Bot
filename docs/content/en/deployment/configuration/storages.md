@@ -81,8 +81,9 @@ Stream mode is not supported.
 chat_id = "-1001234567890" # Bot API chat ID (positive for users, negative for basic groups, -100... for channels/supergroups)
 force_file = false # Force sending as file, default is false
 skip_large = false # Skip large files, default is false. If enabled, files exceeding Telegram's limit will not be uploaded.
-split_large_video = false # Losslessly split oversized videos into one album of up to 10 independently playable parts. Falls back to ZIP parts on failure or when more than 10 parts are required.
-split_size_mb = 0 # Split size in MB. 0 uses the uploader account limit: 2000 MB for bots/regular users and 4000 MB for Premium users. Oversized non-video files use ZIP parts. Ignored when skip_large is true.
+split_large_video = false # Losslessly split videos by duration into playable parts (sequential albums). Requires ffmpeg/ffprobe. Sends parts instead of the original.
+split_duration_sec = 120 # Target seconds per part. 0 defaults to 120 (~2 minutes). Unrelated to file size / MB.
+split_size_mb = 0 # ZIP part size in MB for oversized non-split uploads only. 0 = account upload limit. Ignored when skip_large is true.
 use_metadata_caption = false # Use metadata text as caption when the live source caption is absent
 use_metadata_album = false # Use metadata grouped_id to preserve source media groups when live grouping is absent
 ```
