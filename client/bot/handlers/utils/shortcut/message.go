@@ -10,6 +10,7 @@ import (
 	"github.com/krau/SaveAny-Bot/client/bot/handlers/utils/mediautil"
 	"github.com/krau/SaveAny-Bot/client/bot/handlers/utils/msgelem"
 	"github.com/krau/SaveAny-Bot/client/bot/handlers/utils/re"
+	"github.com/krau/SaveAny-Bot/client/middleware/nilmarkup"
 	uc "github.com/krau/SaveAny-Bot/client/user"
 	"github.com/krau/SaveAny-Bot/common/cache"
 	"github.com/krau/SaveAny-Bot/common/i18n"
@@ -70,11 +71,14 @@ func GetFilesFromUpdateLinkMessageWithReplyEdit(ctx *ext.Context, update *ext.Up
 		return nil, nil, nil, dispatcher.EndGroups
 	}
 	editReplied = func(text string, markup tg.ReplyMarkupClass) {
-		if _, err := ctx.EditMessage(update.EffectiveChat().GetID(), &tg.MessagesEditMessageRequest{
-			ID:          replied.ID,
-			Message:     text,
-			ReplyMarkup: markup,
-		}); err != nil {
+		req := &tg.MessagesEditMessageRequest{
+			ID:      replied.ID,
+			Message: text,
+		}
+		if !nilmarkup.IsNil(markup) {
+			req.ReplyMarkup = markup
+		}
+		if _, err := ctx.EditMessage(update.EffectiveChat().GetID(), req); err != nil {
 			logger.Errorf("failed to edit message: %s", err)
 		}
 	}

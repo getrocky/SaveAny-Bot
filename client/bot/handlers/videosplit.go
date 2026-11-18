@@ -244,11 +244,14 @@ func videoSplitListMarkup(storages []*storconfig.TelegramStorageConfig) *tg.Repl
 }
 
 func editVideoSplit(ctx *ext.Context, update *ext.Update, text string, mk *tg.ReplyInlineMarkup) {
-	ctx.EditMessage(chatID(update), &tg.MessagesEditMessageRequest{
-		ID:          update.CallbackQuery.GetMsgID(),
-		Message:     text,
-		ReplyMarkup: mk,
-	})
+	req := &tg.MessagesEditMessageRequest{
+		ID:      update.CallbackQuery.GetMsgID(),
+		Message: text,
+	}
+	if mk != nil {
+		req.ReplyMarkup = mk
+	}
+	ctx.EditMessage(chatID(update), req)
 }
 
 func handleConfigVideoSplitCallback(ctx *ext.Context, update *ext.Update) error {

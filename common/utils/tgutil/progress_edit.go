@@ -2,6 +2,7 @@ package tgutil
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -117,6 +118,12 @@ func (q *ProgressEditQueue) perform(job progressEditJob) {
 		}
 	}()
 	if err := q.sender(job.ctx, job.chatID, job.req); err != nil {
+		if errors.Is(err, context.Canceled) {
+			// The task finished or was cancelled while an intermediate
+			// progress edit was in flight; nothing is lost.
+			log.FromContext(job.ctx).Debugf("Progress message edit skipped: %v", err)
+			return
+		}
 		log.FromContext(job.ctx).Errorf("Failed to edit progress message: %v", err)
 	}
 }

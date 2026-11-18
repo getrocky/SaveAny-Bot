@@ -103,7 +103,9 @@ func dirMenuText(dirs []database.Dir) string {
 	return b.String()
 }
 
-func dirMenuMarkup(dirs []database.Dir) *tg.ReplyInlineMarkup {
+// dirMenuMarkup returns an untyped nil when there is nothing to delete: a nil
+// *tg.ReplyInlineMarkup inside tg.ReplyMarkupClass cannot be encoded.
+func dirMenuMarkup(dirs []database.Dir) tg.ReplyMarkupClass {
 	if len(dirs) == 0 {
 		return nil
 	}

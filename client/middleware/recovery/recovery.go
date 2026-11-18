@@ -39,6 +39,12 @@ func (r *recovery) Handle(next tg.Invoker) telegram.InvokeFunc {
 
 		return backoff.RetryNotify(func() error {
 			if err := next.Invoke(ctx, input, output); err != nil {
+				if !encodable(input) {
+					// A request that cannot be serialized fails the same way on
+					// every attempt; retrying only stalls the caller for the
+					// whole backoff window.
+					return backoff.Permanent(err)
+				}
 				if r.shouldRecover(ctx, err) {
 					return fmt.Errorf("recovery: %w", err)
 				}
@@ -67,4 +73,14 @@ func (r *recovery) shouldRecover(ctx context.Context, err error) bool {
 	_, ok := tgerr.As(err)
 
 	return !ok
+}
+
+// encodable reports whether input can be serialized. It is only called after a
+// failed invoke, so successful requests are never encoded twice.
+func encodable(input bin.Encoder) bool {
+	if input == nil {
+		return true
+	}
+	var buf bin.Buffer
+	return input.Encode(&buf) == nil
 }
