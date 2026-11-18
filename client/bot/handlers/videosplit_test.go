@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -57,5 +58,33 @@ func TestVideoSplitCallbackDataFits(t *testing.T) {
 	data := vsplitData("m", uint(4294967295), storconfig.SplitModeDuration)
 	if len(data) > 64 {
 		t.Fatalf("callback data too long: %d", len(data))
+	}
+}
+
+func TestParseVideoRecompressMB(t *testing.T) {
+	if v, err := parseVideoRecompressMB(" 300MB "); err != nil || v != 300 {
+		t.Fatalf("parse 300MB = %d, %v", v, err)
+	}
+	for _, bad := range []string{"abc", "5", "5000"} {
+		if _, err := parseVideoRecompressMB(bad); err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+	}
+}
+
+func TestVideoRecompressMenu(t *testing.T) {
+	if data := vrecompData("q", uint(4294967295), 26); len(data) > 64 {
+		t.Fatalf("callback data too long: %d", len(data))
+	}
+	st := &storconfig.TelegramStorageConfig{}
+	mk := videoRecompressDetailMarkup(st)
+	if mk == nil || len(mk.Rows) != 4 || len(mk.Rows[1].Buttons) != 3 {
+		t.Fatalf("unexpected recompress markup: %+v", mk)
+	}
+	text := videoRecompressDetailText(st, "")
+	for _, want := range []string{"已关闭", "CRF 20", "200 MB"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("detail text %q missing %q", text, want)
+		}
 	}
 }

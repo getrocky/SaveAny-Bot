@@ -70,6 +70,7 @@ func createVideoParts(
 	mode string,
 	segmentSec int64,
 	maxPartBytes int64,
+	recompress *recompressOptions,
 ) ([]losslessVideoPart, func(), error) {
 	inputPath, sourceCleanup, err := sourceFile(r)
 	if err != nil {
@@ -94,6 +95,27 @@ func createVideoParts(
 			log.FromContext(ctx).Warnf("Failed to clean video parts: %s", err)
 		}
 		sourceCleanup()
+	}
+
+	if recompress != nil {
+		// Slice and recompress in one ffmpeg pass; fall back to stream-copy
+		// slicing when it would not save space or there is no room.
+		encodedDir := filepath.Join(tempDir, "recompress")
+		parts, encErr := splitVideoEncoded(ctx, inputPath, encodedDir, filename, mode, segmentSec, maxPartBytes, recompress)
+		switch {
+		case encErr == nil:
+			return parts, cleanup, nil
+		case ctx.Err() != nil:
+			cleanup()
+			return nil, func() {}, ctx.Err()
+		case errors.Is(encErr, errVideoShorterThanSegment), errors.Is(encErr, errVideoWithinSizeLimit):
+			// Let the stream-copy path below decide (it may still size-split).
+		default:
+			log.FromContext(ctx).Infof("Recompress while slicing skipped, using stream-copy slices: %v", encErr)
+		}
+		if err := os.RemoveAll(encodedDir); err != nil {
+			log.FromContext(ctx).Warnf("Failed to clean recompressed parts: %s", err)
+		}
 	}
 
 	var parts []losslessVideoPart

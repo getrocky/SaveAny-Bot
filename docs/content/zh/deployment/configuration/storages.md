@@ -92,6 +92,13 @@ split_duration_sec = 120
 # 超限文件 ZIP 分卷大小 (MB)。仅用于超过 Telegram 上传上限时的 ZIP 分卷，与视频时长切片无关。
 # 0 表示使用账号上传上限。skip_large 启用时无效。
 split_size_mb = 0
+# 视频重压：大视频先用 H.264 (libx264 veryfast) 重新压缩再上传，压完小不了 10% 就保留原视频。
+# 同时开启切片时，切片和重压在同一次 ffmpeg 处理中完成。默认关闭。
+recompress_video = false
+# 大于这个大小 (MB) 的视频才重压。0 表示默认 200。
+recompress_min_mb = 200
+# 画质 CRF，越小画质越好、文件越大：20 高画质，23 均衡，26 省空间。0 表示默认 20。
+recompress_crf = 20
 # 没有实时 caption 时，用元数据中的消息文本作为发送 caption
 use_metadata_caption = false
 # 没有实时分组信息时，用元数据 grouped_id 将文件作为媒体组发送

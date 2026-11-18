@@ -346,6 +346,24 @@ func handleVideoSplitInput(ctx *ext.Context, update *ext.Update) error {
 		ctx.Reply(update, ext.ReplyTextString("你没有这个存储的权限"), nil)
 		return dispatcher.EndGroups
 	}
+	if pending.mode == videoRecompressInputMode {
+		value, err := parseVideoRecompressMB(msg.Text)
+		if err != nil {
+			videoSplitInputs.set(userID, chat, pending)
+			ctx.Reply(update, ext.ReplyTextString(err.Error()+"，请重新发送，或点「取消」。"), nil)
+			return dispatcher.EndGroups
+		}
+		if err := updateStorageConfig(ctx, st.GetID(), map[string]any{"recompress_min_mb": value}); err != nil {
+			ctx.Reply(update, ext.ReplyTextString("保存失败："+err.Error()), nil)
+			return dispatcher.EndGroups
+		}
+		if fresh := userTelegramStorage(userID, st.GetID()); fresh != nil {
+			st = fresh
+		}
+		note := fmt.Sprintf("已设置为大于 %d MB 的视频才重压", value)
+		ctx.Reply(update, ext.ReplyTextString(videoRecompressDetailText(st, note)), &ext.ReplyOpts{Markup: videoRecompressDetailMarkup(st)})
+		return dispatcher.EndGroups
+	}
 	value, err := parseVideoSplitValue(pending.mode, msg.Text)
 	if err != nil {
 		videoSplitInputs.set(userID, chat, pending)

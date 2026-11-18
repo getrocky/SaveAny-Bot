@@ -30,6 +30,14 @@ type TelegramStorageConfig struct {
 	// SplitSizeMB is the maximum size of each video part in MB when SplitMode
 	// is "size". 0 uses the account upload limit.
 	SplitSizeMB int64 `toml:"split_size_mb" mapstructure:"split_size_mb" json:"split_size_mb"`
+	// RecompressVideo re-encodes large videos (H.264, visually lossless CRF)
+	// before upload. When slicing is on too, each part is encoded in the same
+	// ffmpeg pass. Off by default.
+	RecompressVideo bool `toml:"recompress_video" mapstructure:"recompress_video" json:"recompress_video"`
+	// RecompressMinMB only recompresses videos larger than this. 0 defaults to 200.
+	RecompressMinMB int64 `toml:"recompress_min_mb" mapstructure:"recompress_min_mb" json:"recompress_min_mb"`
+	// RecompressCRF is the x264 quality (lower = better/larger). 0 defaults to 20.
+	RecompressCRF int `toml:"recompress_crf" mapstructure:"recompress_crf" json:"recompress_crf"`
 	// Use metadata text as the caption when the live source caption is absent.
 	UseMetadataCaption bool `toml:"use_metadata_caption" mapstructure:"use_metadata_caption" json:"use_metadata_caption"`
 	// Use grouped_id from metadata to preserve source media groups when the live
@@ -54,6 +62,12 @@ func (m *TelegramStorageConfig) Validate() error {
 	if m.SplitSizeMB < 0 {
 		return fmt.Errorf("split_size_mb must be >= 0 for telegram storage")
 	}
+	if m.RecompressMinMB < 0 {
+		return fmt.Errorf("recompress_min_mb must be >= 0 for telegram storage")
+	}
+	if m.RecompressCRF < 0 || m.RecompressCRF > 51 {
+		return fmt.Errorf("recompress_crf must be between 0 and 51 for telegram storage")
+	}
 	switch m.SplitMode {
 	case "", SplitModeDuration, SplitModeSize:
 	default:
@@ -68,6 +82,27 @@ func (m *TelegramStorageConfig) GetType() storenum.StorageType {
 
 func (m *TelegramStorageConfig) GetName() string {
 	return m.Name
+}
+
+const (
+	DefaultRecompressMinMB = 200
+	DefaultRecompressCRF   = 20
+)
+
+// EffectiveRecompressMinMB returns the recompress trigger size in MB.
+func (m *TelegramStorageConfig) EffectiveRecompressMinMB() int64 {
+	if m.RecompressMinMB <= 0 {
+		return DefaultRecompressMinMB
+	}
+	return m.RecompressMinMB
+}
+
+// EffectiveRecompressCRF returns the x264 CRF used for recompression.
+func (m *TelegramStorageConfig) EffectiveRecompressCRF() int {
+	if m.RecompressCRF <= 0 {
+		return DefaultRecompressCRF
+	}
+	return m.RecompressCRF
 }
 
 // EffectiveSplitMode returns the configured video split mode, defaulting to duration.

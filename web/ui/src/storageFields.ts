@@ -154,6 +154,24 @@ export const storageTypeDefs: StorageTypeDef[] = [
         hint: 'storages.fields.splitSizeHint',
       },
       {
+        name: 'recompress_video',
+        label: 'storages.fields.recompressVideo',
+        kind: 'bool',
+        hint: 'storages.fields.recompressVideoHint',
+      },
+      {
+        name: 'recompress_min_mb',
+        label: 'storages.fields.recompressMinMB',
+        kind: 'number',
+        hint: 'storages.fields.recompressMinMBHint',
+      },
+      {
+        name: 'recompress_crf',
+        label: 'storages.fields.recompressCRF',
+        kind: 'number',
+        hint: 'storages.fields.recompressCRFHint',
+      },
+      {
         name: 'use_metadata_caption',
         label: 'storages.fields.useMetadataCaption',
         kind: 'bool',

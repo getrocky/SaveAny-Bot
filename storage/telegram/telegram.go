@@ -257,6 +257,20 @@ func (t *Telegram) saveWithContext(ctx context.Context, tctx *ext.Context, r io.
 		if handled || err != nil {
 			return err
 		}
+		// Not sliced: optionally recompress the whole video before upload.
+		if size <= maxUploadSize {
+			recompressed, err := t.prepareRecompressedVideo(ctx, tctx, rs, storagePath, size)
+			if err != nil {
+				return err
+			}
+			if recompressed != nil {
+				defer recompressed.Close()
+				r, size, storagePath = recompressed.file, recompressed.size, recompressed.storagePath
+				if progress != nil {
+					progress.reset(size)
+				}
+			}
+		}
 	}
 
 	if size > maxUploadSize {
@@ -369,7 +383,11 @@ func (t *Telegram) trySliceVideo(
 	if err := t.limiter.Wait(ctx); err != nil {
 		return true, fmt.Errorf("rate limit failed: %w", err)
 	}
-	parts, cleanup, err := createVideoParts(ctx, rs, filename, mode, t.config.SplitDurationSec, partLimit)
+	recompress := t.recompressOptionsFor(size)
+	if recompress != nil {
+		log.FromContext(ctx).Infof("Recompressing video parts in the same pass (crf=%d, preset=%s)", recompress.CRF, recompressPreset)
+	}
+	parts, cleanup, err := createVideoParts(ctx, rs, filename, mode, t.config.SplitDurationSec, partLimit, recompress)
 	if err != nil {
 		if ctx.Err() != nil {
 			return true, ctx.Err()
@@ -836,6 +854,29 @@ func (t *Telegram) saveMediaGroup(
 	group []batchMediaItem,
 	onProgress func(index int, uploaded, total int64),
 ) error {
+	// Recompress album videos once, outside the retry loop, so the album stays
+	// one message and a retry does not encode again.
+	recompressed := map[int]*recompressedVideo{}
+	defer func() {
+		for _, video := range recompressed {
+			video.Close()
+		}
+	}()
+	if !(len(group) == 1 && group[0].useSingleSave) {
+		for index, mediaItem := range group {
+			item := mediaItem.item
+			if _, err := item.Reader.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("failed to seek batch item: %w", err)
+			}
+			video, err := t.prepareRecompressedVideo(ctx, tctx, item.Reader, item.StoragePath, item.Size)
+			if err != nil {
+				return err
+			}
+			if video != nil {
+				recompressed[index] = video
+			}
+		}
+	}
 	return retry.Retry(func() error {
 		if len(group) == 1 && group[0].useSingleSave {
 			mediaItem := group[0]
@@ -863,7 +904,12 @@ func (t *Telegram) saveMediaGroup(
 		emptyCaption := ""
 		for index, mediaItem := range group {
 			item := mediaItem.item
-			if _, err := item.Reader.Seek(0, io.SeekStart); err != nil {
+			reader, storagePath, size := io.ReadSeeker(item.Reader), item.StoragePath, item.Size
+			if video := recompressed[index]; video != nil {
+				reader, storagePath, size = video.file, video.storagePath, video.size
+				mediaItem.item.Size = size
+			}
+			if _, err := reader.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("failed to seek batch item: %w", err)
 			}
 			captionOverride := &emptyCaption
@@ -871,7 +917,7 @@ func (t *Telegram) saveMediaGroup(
 				captionOverride = t.albumCaption(item)
 			}
 			progress := batchItemUploadProgress(mediaItem, onProgress)
-			media, err := t.prepareMedia(ctx, tctx, item.Reader, item.StoragePath, item.Size, captionOverride, progress)
+			media, err := t.prepareMedia(ctx, tctx, reader, storagePath, size, captionOverride, progress)
 			if err != nil {
 				return err
 			}

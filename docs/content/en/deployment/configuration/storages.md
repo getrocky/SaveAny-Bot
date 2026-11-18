@@ -84,6 +84,9 @@ skip_large = false # Skip large files, default is false. If enabled, files excee
 split_large_video = false # Losslessly split videos by duration into playable parts (sequential albums). Requires ffmpeg/ffprobe. Sends parts instead of the original.
 split_duration_sec = 120 # Target seconds per part. 0 defaults to 120 (~2 minutes). Unrelated to file size / MB.
 split_size_mb = 0 # ZIP part size in MB for oversized non-split uploads only. 0 = account upload limit. Ignored when skip_large is true.
+recompress_video = false # Re-encode large videos with H.264 (libx264 veryfast) before upload; kept only if >=10% smaller. Done in the same ffmpeg pass as slicing. Off by default.
+recompress_min_mb = 200 # Only recompress videos larger than this. 0 defaults to 200.
+recompress_crf = 20 # Quality: lower = better/larger. 20 high, 23 balanced, 26 smaller. 0 defaults to 20.
 use_metadata_caption = false # Use metadata text as caption when the live source caption is absent
 use_metadata_album = false # Use metadata grouped_id to preserve source media groups when live grouping is absent
 ```

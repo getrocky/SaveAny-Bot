@@ -134,3 +134,15 @@ func TestLockTaskUploadsReentrant(t *testing.T) {
 	unlock()
 	<-other
 }
+
+func TestRecompressConfigValidation(t *testing.T) {
+	cfg := storconfig.TelegramStorageConfig{ChatID: 123456, RecompressCRF: 60}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("recompress_crf above 51 should fail validation")
+	}
+	cfg.RecompressCRF = 0
+	cfg.RecompressMinMB = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative recompress_min_mb should fail validation")
+	}
+}
