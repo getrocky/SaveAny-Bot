@@ -137,6 +137,7 @@ func DefaultsMap(dataDir string) map[string]any {
 		"telegram.userbot.session":     DefaultUserbotSessionPath(dataDir),
 		"telegram.relay_chat_id":       0,
 		"telegram.relay_keep_messages": true,
+		"telegram.prefer_ipv6":         true,
 
 		"temp.base_path": "cache/",
 
@@ -185,6 +186,7 @@ func Default(dataDir string) Config {
 			RpcRetry:          5,
 			Userbot:           userbotConfig{Session: DefaultUserbotSessionPath(dataDir)},
 			RelayKeepMessages: true,
+			PreferIPv6:        true,
 		},
 		Ytdlp: YtdlpConfig{
 			Recode:           "mp4",

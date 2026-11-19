@@ -10,6 +10,8 @@ type telegramConfig struct {
 	MediaGroupTimeout int           `toml:"media_group_timeout" mapstructure:"media_group_timeout" json:"media_group_timeout"`
 	RelayChatID       int64         `toml:"relay_chat_id" mapstructure:"relay_chat_id" json:"relay_chat_id"`
 	RelayKeepMessages bool          `toml:"relay_keep_messages" mapstructure:"relay_keep_messages" json:"relay_keep_messages"`
+	// PreferIPv6 makes direct (non-proxy) MTProto connections pick IPv6 DC addresses first.
+	PreferIPv6 bool `toml:"prefer_ipv6" mapstructure:"prefer_ipv6" json:"prefer_ipv6"`
 }
 
 type userbotConfig struct {

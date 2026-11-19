@@ -8,8 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/transport"
 	"github.com/krau/SaveAny-Bot/config"
 	"golang.org/x/net/proxy"
 )
@@ -104,7 +107,12 @@ func newProxyDialer(proxyUrl string) (proxy.ContextDialer, error) {
 }
 
 func NewConfigProxyResolver() (dcs.Resolver, error) {
-	resolver := dcs.DefaultResolver()
+	// Direct connections: optionally prefer native IPv6 DC addresses (IPv4 stays as fallback).
+	// When a proxy is configured, keep the default order since the proxy may not carry IPv6.
+	var resolver dcs.Resolver = dcs.Plain(dcs.PlainOptions{})
+	if config.C().Telegram.PreferIPv6 {
+		resolver = newIPv6FirstResolver(dcs.PlainOptions{PreferIPv6: true})
+	}
 	if config.C().Proxy != "" {
 		// global proxy, which has lower priority
 		dialer, err := newProxyDialer(config.C().Proxy)
@@ -125,4 +133,58 @@ func NewConfigProxyResolver() (dcs.Resolver, error) {
 		})
 	}
 	return resolver, nil
+}
+
+// ipv6FirstResolver dials only the IPv6 addresses of a DC first and falls back to the
+// full list (IPv4 included) if that fails. gotd's own PreferIPv6 merely sorts candidates,
+// but the plain resolver then races every candidate, so a faster IPv4 path can still win.
+type ipv6FirstResolver struct {
+	inner dcs.Resolver
+}
+
+func newIPv6FirstResolver(opts dcs.PlainOptions) dcs.Resolver {
+	return ipv6FirstResolver{inner: dcs.Plain(opts)}
+}
+
+func onlyIPv6(list dcs.List, dc int) (dcs.List, bool) {
+	v6 := make([]tg.DCOption, 0, len(list.Options))
+	for _, o := range list.Options {
+		if o.ID == dc && o.Ipv6 {
+			v6 = append(v6, o)
+		}
+	}
+	if len(v6) == 0 {
+		return list, false
+	}
+	list.Options = v6
+	return list, true
+}
+
+func (r ipv6FirstResolver) try(ctx context.Context, dc int, list dcs.List,
+	f func(context.Context, int, dcs.List) (transport.Conn, error)) (transport.Conn, error) {
+	if v6, ok := onlyIPv6(list, dc); ok {
+		// Bound the IPv6 attempt so a broken IPv6 route falls back to IPv4 quickly.
+		v6ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		conn, err := f(v6ctx, dc, v6)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return f(ctx, dc, list)
+}
+
+func (r ipv6FirstResolver) Primary(ctx context.Context, dc int, list dcs.List) (transport.Conn, error) {
+	return r.try(ctx, dc, list, r.inner.Primary)
+}
+
+func (r ipv6FirstResolver) MediaOnly(ctx context.Context, dc int, list dcs.List) (transport.Conn, error) {
+	return r.try(ctx, dc, list, r.inner.MediaOnly)
+}
+
+func (r ipv6FirstResolver) CDN(ctx context.Context, dc int, list dcs.List) (transport.Conn, error) {
+	return r.try(ctx, dc, list, r.inner.CDN)
 }
