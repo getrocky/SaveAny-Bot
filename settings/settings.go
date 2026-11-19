@@ -52,18 +52,22 @@ var (
 )
 
 type coreGroup struct {
-	Lang               string `json:"lang"`
-	Workers            int    `json:"workers"`
-	Retry              int    `json:"retry"`
-	Threads            int    `json:"threads"`
-	DownloadThreads    int    `json:"download_threads"`
-	MaxDownloadThreads int    `json:"max_download_threads"`
-	TransferBudget     int    `json:"transfer_budget"`
-	RelayMinSizeMB     int    `json:"relay_min_size_mb"`
-	ChunkRetries       int    `json:"chunk_retries"`
-	Stream             bool   `json:"stream"`
-	NoCleanCache       bool   `json:"no_clean_cache"`
-	Proxy              string `json:"proxy"`
+	Lang                 string `json:"lang"`
+	Workers              int    `json:"workers"`
+	Retry                int    `json:"retry"`
+	Threads              int    `json:"threads"`
+	DownloadThreads      int    `json:"download_threads"`
+	MaxDownloadThreads   int    `json:"max_download_threads"`
+	TransferBudget       int    `json:"transfer_budget"`
+	RelayMinSizeMB       int    `json:"relay_min_size_mb"`
+	ChunkRetries         int    `json:"chunk_retries"`
+	Stream               bool   `json:"stream"`
+	NoCleanCache         bool   `json:"no_clean_cache"`
+	AutoCleanCache       bool   `json:"auto_clean_cache"`
+	AutoCleanIdleHours   int    `json:"auto_clean_idle_hours"`
+	AutoCleanIntervalMin int    `json:"auto_clean_interval_min"`
+	LowDiskCleanMB       int    `json:"low_disk_clean_mb"`
+	Proxy                string `json:"proxy"`
 }
 
 type authGroup struct {
@@ -85,18 +89,22 @@ func groupValue(cfg config.Config, group string) (any, error) {
 	switch group {
 	case GroupCore:
 		return coreGroup{
-			Lang:               cfg.Lang,
-			Workers:            cfg.Workers,
-			Retry:              cfg.Retry,
-			Threads:            cfg.Threads,
-			DownloadThreads:    cfg.DownloadThreads,
-			MaxDownloadThreads: cfg.MaxDownloadThreads,
-			TransferBudget:     cfg.TransferBudget,
-			RelayMinSizeMB:     cfg.RelayMinSizeMB,
-			ChunkRetries:       cfg.ChunkRetries,
-			Stream:             cfg.Stream,
-			NoCleanCache:       cfg.NoCleanCache,
-			Proxy:              cfg.Proxy,
+			Lang:                 cfg.Lang,
+			Workers:              cfg.Workers,
+			Retry:                cfg.Retry,
+			Threads:              cfg.Threads,
+			DownloadThreads:      cfg.DownloadThreads,
+			MaxDownloadThreads:   cfg.MaxDownloadThreads,
+			TransferBudget:       cfg.TransferBudget,
+			RelayMinSizeMB:       cfg.RelayMinSizeMB,
+			ChunkRetries:         cfg.ChunkRetries,
+			Stream:               cfg.Stream,
+			NoCleanCache:         cfg.NoCleanCache,
+			AutoCleanCache:       cfg.AutoCleanCache,
+			AutoCleanIdleHours:   cfg.AutoCleanIdleHours,
+			AutoCleanIntervalMin: cfg.AutoCleanIntervalMin,
+			LowDiskCleanMB:       cfg.LowDiskCleanMB,
+			Proxy:                cfg.Proxy,
 		}, nil
 	case GroupLog:
 		return cfg.Log, nil
@@ -131,18 +139,22 @@ func applyGroup(cfg *config.Config, group string, raw []byte) error {
 	switch group {
 	case GroupCore:
 		g := coreGroup{
-			Lang:               cfg.Lang,
-			Workers:            cfg.Workers,
-			Retry:              cfg.Retry,
-			Threads:            cfg.Threads,
-			DownloadThreads:    cfg.DownloadThreads,
-			MaxDownloadThreads: cfg.MaxDownloadThreads,
-			TransferBudget:     cfg.TransferBudget,
-			RelayMinSizeMB:     cfg.RelayMinSizeMB,
-			ChunkRetries:       cfg.ChunkRetries,
-			Stream:             cfg.Stream,
-			NoCleanCache:       cfg.NoCleanCache,
-			Proxy:              cfg.Proxy,
+			Lang:                 cfg.Lang,
+			Workers:              cfg.Workers,
+			Retry:                cfg.Retry,
+			Threads:              cfg.Threads,
+			DownloadThreads:      cfg.DownloadThreads,
+			MaxDownloadThreads:   cfg.MaxDownloadThreads,
+			TransferBudget:       cfg.TransferBudget,
+			RelayMinSizeMB:       cfg.RelayMinSizeMB,
+			ChunkRetries:         cfg.ChunkRetries,
+			Stream:               cfg.Stream,
+			NoCleanCache:         cfg.NoCleanCache,
+			AutoCleanCache:       cfg.AutoCleanCache,
+			AutoCleanIdleHours:   cfg.AutoCleanIdleHours,
+			AutoCleanIntervalMin: cfg.AutoCleanIntervalMin,
+			LowDiskCleanMB:       cfg.LowDiskCleanMB,
+			Proxy:                cfg.Proxy,
 		}
 		if err := json.Unmarshal(raw, &g); err != nil {
 			return err
@@ -158,6 +170,10 @@ func applyGroup(cfg *config.Config, group string, raw []byte) error {
 		cfg.ChunkRetries = g.ChunkRetries
 		cfg.Stream = g.Stream
 		cfg.NoCleanCache = g.NoCleanCache
+		cfg.AutoCleanCache = g.AutoCleanCache
+		cfg.AutoCleanIdleHours = g.AutoCleanIdleHours
+		cfg.AutoCleanIntervalMin = g.AutoCleanIntervalMin
+		cfg.LowDiskCleanMB = g.LowDiskCleanMB
 		cfg.Proxy = g.Proxy
 		return nil
 	case GroupLog:
@@ -291,6 +307,15 @@ func Load(ctx context.Context, dataDir string) (config.Config, error) {
 	}
 	if cfg.ChunkRetries < 1 {
 		cfg.ChunkRetries = 20
+	}
+	if cfg.AutoCleanIdleHours < 1 {
+		cfg.AutoCleanIdleHours = 6
+	}
+	if cfg.AutoCleanIntervalMin < 1 {
+		cfg.AutoCleanIntervalMin = 30
+	}
+	if cfg.LowDiskCleanMB < 0 {
+		cfg.LowDiskCleanMB = 0
 	}
 	return cfg, nil
 }
@@ -499,6 +524,9 @@ func validateGroup(cfg *config.Config, group string) error {
 		if cfg.DownloadThreads < 0 || cfg.MaxDownloadThreads < 0 || cfg.TransferBudget < 0 ||
 			cfg.RelayMinSizeMB < 0 || cfg.ChunkRetries < 0 {
 			return errors.New("transfer limits must be non-negative")
+		}
+		if cfg.AutoCleanIdleHours < 1 || cfg.AutoCleanIntervalMin < 1 || cfg.LowDiskCleanMB < 0 {
+			return errors.New("auto clean idle hours and interval must be at least 1, low disk threshold must not be negative")
 		}
 		if cfg.Proxy != "" {
 			if _, err := config.ProxyTransport(cfg.Proxy); err != nil {

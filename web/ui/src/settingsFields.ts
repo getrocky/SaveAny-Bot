@@ -91,6 +91,33 @@ export const settingsGroups: SettingsGroupDef[] = [
       { path: 'stream', label: 'settings.core.stream', kind: 'bool' },
       { path: 'no_clean_cache', label: 'settings.core.noCleanCache', kind: 'bool' },
       {
+        path: 'auto_clean_cache',
+        label: 'settings.core.autoCleanCache',
+        kind: 'bool',
+        hint: 'settings.core.autoCleanCacheHint',
+      },
+      {
+        path: 'auto_clean_idle_hours',
+        label: 'settings.core.autoCleanIdleHours',
+        kind: 'number',
+        hint: 'settings.core.autoCleanIdleHoursHint',
+        min: 1,
+      },
+      {
+        path: 'auto_clean_interval_min',
+        label: 'settings.core.autoCleanIntervalMin',
+        kind: 'number',
+        hint: 'settings.core.autoCleanIntervalMinHint',
+        min: 1,
+      },
+      {
+        path: 'low_disk_clean_mb',
+        label: 'settings.core.lowDiskCleanMb',
+        kind: 'number',
+        hint: 'settings.core.lowDiskCleanMbHint',
+        min: 0,
+      },
+      {
         path: 'proxy',
         label: 'settings.core.proxy',
         kind: 'text',

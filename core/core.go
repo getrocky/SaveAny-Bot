@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"github.com/krau/SaveAny-Bot/config"
 	"github.com/krau/SaveAny-Bot/database"
 	"github.com/krau/SaveAny-Bot/pkg/enums/taskstatus"
@@ -55,6 +56,12 @@ type DestinationInfo interface {
 	StoragePath() string
 }
 
+// CacheKeyer lets a task name extra cache entries (such as per-file IDs) that
+// the automatic cache cleaner must leave alone while the task runs.
+type CacheKeyer interface {
+	CacheKeys() []string
+}
+
 // ParamSource exposes the creation parameters that a queued task needs to be
 // rebuilt after a restart.
 type ParamSource interface {
@@ -89,7 +96,14 @@ func worker(ctx context.Context, qe *queue.TaskQueue[Executable], semaphore chan
 		}); dbErr != nil {
 			logger.Errorf("Failed to update task record for %s: %v", exe.TaskID(), dbErr)
 		}
-		err = exe.Execute(taskCtx)
+		keys := []string{exe.TaskID()}
+		if ck, ok := exe.(CacheKeyer); ok {
+			keys = append(keys, ck.CacheKeys()...)
+		}
+		err = func() error {
+			defer cachegc.Hold(keys...)()
+			return exe.Execute(taskCtx)
+		}()
 		items := collectItemResults(exe)
 		failedItems := countItems(items, ItemStatusFailed)
 		status := taskstatus.Completed.String()

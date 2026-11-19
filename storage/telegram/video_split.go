@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"io"
 	"os"
 	"os/exec"
@@ -90,10 +91,12 @@ func createVideoParts(
 		sourceCleanup()
 		return nil, func() {}, fmt.Errorf("failed to create video split directory: %w", err)
 	}
+	releaseHold := cachegc.Hold(filepath.Base(tempDir))
 	cleanup := func() {
 		if err := os.RemoveAll(tempDir); err != nil {
 			log.FromContext(ctx).Warnf("Failed to clean video parts: %s", err)
 		}
+		releaseHold()
 		sourceCleanup()
 	}
 

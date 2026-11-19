@@ -16,12 +16,14 @@ import (
 	"github.com/krau/SaveAny-Bot/client/bot/handlers"
 	"github.com/krau/SaveAny-Bot/client/user"
 	"github.com/krau/SaveAny-Bot/client/worker"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"github.com/krau/SaveAny-Bot/common/selfupdate"
 	"github.com/krau/SaveAny-Bot/config"
 	"github.com/krau/SaveAny-Bot/core"
 	"github.com/krau/SaveAny-Bot/core/resume"
 	"github.com/krau/SaveAny-Bot/database"
 	"github.com/krau/SaveAny-Bot/parsers"
+	"github.com/krau/SaveAny-Bot/pkg/queue"
 	"github.com/krau/SaveAny-Bot/settings"
 	"github.com/krau/SaveAny-Bot/storage"
 	"github.com/krau/SaveAny-Bot/web"
@@ -115,12 +117,50 @@ func (a *App) Start() error {
 			log.Errorf("Failed to apply telegram settings: %v", err)
 		}
 	}()
+	go cachegc.Run(a.ctx, a.cacheSettings, activeTaskName)
 	a.resumeDone = make(chan struct{})
 	go func() {
 		defer close(a.resumeDone)
 		resume.Run(a.ctx)
 	}()
 	return nil
+}
+
+// cacheSettings derives the automatic cache cleaner settings from the live
+// configuration. An empty Dir (stream mode, unsafe path) disables cleaning.
+func (a *App) cacheSettings() cachegc.Settings {
+	cfg := a.svc.Config()
+	s := cachegc.Settings{
+		Enabled:      cfg.AutoCleanCache && !cfg.NoCleanCache,
+		IdleFor:      time.Duration(max(cfg.AutoCleanIdleHours, 1)) * time.Hour,
+		Interval:     time.Duration(max(cfg.AutoCleanIntervalMin, 1)) * time.Minute,
+		LowDiskBytes: int64(max(cfg.LowDiskCleanMB, 0)) << 20,
+	}
+	if !s.Enabled || cfg.Stream || cfg.Temp.BasePath == "" {
+		s.Enabled = false
+		return s
+	}
+	dir, err := cachegc.ResolveDir(cfg.Temp.BasePath)
+	if err != nil {
+		log.Debug("Automatic cache cleanup disabled", "error", err)
+		s.Enabled = false
+		return s
+	}
+	s.Dir = dir
+	return s
+}
+
+// activeTaskName reports whether a cache entry belongs to a task that is
+// queued or running in this process.
+func activeTaskName(name string) bool {
+	for _, list := range [][]queue.TaskInfo{core.GetRunningTasks(context.Background()), core.GetQueuedTasks(context.Background())} {
+		for _, t := range list {
+			if len(t.ID) >= 8 && strings.Contains(name, t.ID) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *App) ApplyTelegram(ctx context.Context) error {

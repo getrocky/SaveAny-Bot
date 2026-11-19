@@ -21,7 +21,15 @@ type Config struct {
 	Workers      int    `toml:"workers" mapstructure:"workers" json:"workers"`
 	Retry        int    `toml:"retry" mapstructure:"retry" json:"retry"`
 	NoCleanCache bool   `toml:"no_clean_cache" mapstructure:"no_clean_cache" json:"no_clean_cache"`
-	Threads      int    `toml:"threads" mapstructure:"threads" json:"threads"`
+	// AutoCleanCache periodically removes cache files that no running task
+	// uses and that have been idle for AutoCleanIdleHours. NoCleanCache turns it off too.
+	AutoCleanCache       bool `toml:"auto_clean_cache" mapstructure:"auto_clean_cache" json:"auto_clean_cache"`
+	AutoCleanIdleHours   int  `toml:"auto_clean_idle_hours" mapstructure:"auto_clean_idle_hours" json:"auto_clean_idle_hours"`
+	AutoCleanIntervalMin int  `toml:"auto_clean_interval_min" mapstructure:"auto_clean_interval_min" json:"auto_clean_interval_min"`
+	// LowDiskCleanMB starts an aggressive cleanup of idle cache files when free
+	// disk space falls below it; 0 disables.
+	LowDiskCleanMB int `toml:"low_disk_clean_mb" mapstructure:"low_disk_clean_mb" json:"low_disk_clean_mb"`
+	Threads        int `toml:"threads" mapstructure:"threads" json:"threads"`
 	// DownloadThreads overrides automatic per-file chunk concurrency when > 0.
 	DownloadThreads int `toml:"download_threads" mapstructure:"download_threads" json:"download_threads"`
 	// MaxDownloadThreads caps automatic per-file chunk concurrency.
@@ -114,17 +122,21 @@ func Set(cfg Config) {
 
 func DefaultsMap(dataDir string) map[string]any {
 	return map[string]any{
-		"lang":                 "zh-Hans",
-		"workers":              3,
-		"retry":                3,
-		"no_clean_cache":       false,
-		"threads":              4,
-		"download_threads":     0,
-		"max_download_threads": 16,
-		"transfer_budget":      0,
-		"relay_min_size_mb":    8,
-		"chunk_retries":        20,
-		"log.level":            "debug",
+		"lang":                    "zh-Hans",
+		"workers":                 3,
+		"retry":                   3,
+		"no_clean_cache":          false,
+		"auto_clean_cache":        true,
+		"auto_clean_idle_hours":   6,
+		"auto_clean_interval_min": 30,
+		"low_disk_clean_mb":       500,
+		"threads":                 4,
+		"download_threads":        0,
+		"max_download_threads":    16,
+		"transfer_budget":         0,
+		"relay_min_size_mb":       8,
+		"chunk_retries":           20,
+		"log.level":               "debug",
 
 		"cache.ttl":          86400,
 		"cache.num_counters": 1e5,
@@ -163,16 +175,20 @@ func DefaultsMap(dataDir string) map[string]any {
 
 func Default(dataDir string) Config {
 	return Config{
-		Lang:               "zh-Hans",
-		Workers:            3,
-		Retry:              3,
-		Threads:            4,
-		DownloadThreads:    0,
-		MaxDownloadThreads: 16,
-		TransferBudget:     0,
-		RelayMinSizeMB:     8,
-		ChunkRetries:       20,
-		Log:                logConfig{Level: "debug"},
+		Lang:                 "zh-Hans",
+		Workers:              3,
+		Retry:                3,
+		Threads:              4,
+		DownloadThreads:      0,
+		MaxDownloadThreads:   16,
+		TransferBudget:       0,
+		RelayMinSizeMB:       8,
+		ChunkRetries:         20,
+		AutoCleanCache:       true,
+		AutoCleanIdleHours:   6,
+		AutoCleanIntervalMin: 30,
+		LowDiskCleanMB:       500,
+		Log:                  logConfig{Level: "debug"},
 		Cache: cacheConfig{
 			TTL:         86400,
 			NumCounters: 1e5,

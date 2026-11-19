@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/krau/SaveAny-Bot/app"
 	"github.com/krau/SaveAny-Bot/boot"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"github.com/krau/SaveAny-Bot/common/selfupdate"
 	"github.com/krau/SaveAny-Bot/common/utils/fsutil"
 	"github.com/krau/SaveAny-Bot/config"
@@ -75,24 +75,9 @@ func cleanCache(cfg config.Config) {
 		return
 	}
 	if cfg.Temp.BasePath != "" && !cfg.Stream {
-		currentDir, err := os.Getwd()
+		cachePath, err := cachegc.ResolveDir(cfg.Temp.BasePath)
 		if err != nil {
-			log.Error("Failed to get working directory", "error", err)
-			return
-		}
-		cachePath := cfg.Temp.BasePath
-		if !filepath.IsAbs(cachePath) {
-			cachePath = filepath.Join(currentDir, cachePath)
-		}
-		cachePath, err = filepath.Abs(cachePath)
-		if err != nil {
-			log.Error("Failed to get absolute cache path", "error", err)
-			return
-		}
-		cachePath = filepath.Clean(cachePath)
-		// Never clean the working directory or one of its ancestors.
-		if rel, err := filepath.Rel(cachePath, currentDir); err != nil || rel == "." || !strings.HasPrefix(rel, "..") {
-			log.Error("Refusing to clean unsafe cache directory", "path", cachePath)
+			log.Error("Refusing to clean cache directory", "error", err)
 			return
 		}
 		if _, err := os.Stat(cachePath); os.IsNotExist(err) {

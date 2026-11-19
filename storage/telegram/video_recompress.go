@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"io"
 	"math"
 	"os"
@@ -188,10 +189,12 @@ func recompressWholeVideo(
 	if err != nil {
 		return "", 0, noop, fmt.Errorf("failed to create recompress directory: %w", err)
 	}
+	releaseHold := cachegc.Hold(filepath.Base(tempDir))
 	cleanup := func() {
 		if err := os.RemoveAll(tempDir); err != nil {
 			log.FromContext(ctx).Warnf("Failed to clean recompressed video: %s", err)
 		}
+		releaseHold()
 	}
 	extension := recompressExtension(filename)
 	outputPath := filepath.Join(tempDir, "recompressed"+extension)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"io"
 	"os"
 	"path"
@@ -97,10 +98,11 @@ func (t *Task) processElement(ctx context.Context, elem TaskElement) error {
 		}
 	} else {
 		logger.Info("Downloading to temporary file for ReadSeeker support")
-		tempFile, err := t.downloadToTemp(reader, elem.FileInfo.Name)
+		tempFile, release, err := t.downloadToTemp(reader, elem.FileInfo.Name)
 		if err != nil {
 			return fmt.Errorf("failed to download to temp: %w", err)
 		}
+		defer release()
 		defer os.Remove(tempFile.Name())
 		defer tempFile.Close()
 
@@ -129,7 +131,7 @@ func (t *Task) processElement(ctx context.Context, elem TaskElement) error {
 	return nil
 }
 
-func (t *Task) downloadToTemp(reader io.Reader, filename string) (*os.File, error) {
+func (t *Task) downloadToTemp(reader io.Reader, filename string) (*os.File, func(), error) {
 	tempDir := config.C().Temp.BasePath
 	if tempDir == "" {
 		tempDir = os.TempDir()
@@ -137,14 +139,17 @@ func (t *Task) downloadToTemp(reader io.Reader, filename string) (*os.File, erro
 
 	tempFile, err := os.CreateTemp(tempDir, filepath.Base(filename)+"-*.tmp")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+		return nil, func() {}, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
+	// Keep the automatic cache cleaner away from the file while it is in use.
+	release := cachegc.Hold(filepath.Base(tempFile.Name()))
 	if _, err := io.Copy(tempFile, reader); err != nil {
 		tempFile.Close()
 		os.Remove(tempFile.Name())
-		return nil, fmt.Errorf("failed to copy to temp file: %w", err)
+		release()
+		return nil, func() {}, fmt.Errorf("failed to copy to temp file: %w", err)
 	}
 
-	return tempFile, nil
+	return tempFile, release, nil
 }

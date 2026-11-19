@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ func (t *Task) Execute(ctx context.Context) error {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
+	defer cachegc.Hold(filepath.Base(tempDir))()
 
 	// Absolute: yt-dlp ignores --paths for absolute output templates.
 	if tempDir, err = filepath.Abs(tempDir); err != nil {

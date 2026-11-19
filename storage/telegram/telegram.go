@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/krau/SaveAny-Bot/common/cachegc"
 	"io"
 	"os"
 	"path"
@@ -964,6 +965,7 @@ func (t *Telegram) splitUpload(
 		stem = tempId
 	}
 	outputBase := filepath.Join(config.C().Temp.BasePath, tempId, stem)
+	defer cachegc.Hold(tempId)()
 	defer func() {
 		if err := os.RemoveAll(filepath.Join(config.C().Temp.BasePath, tempId)); err != nil {
 			log.FromContext(ctx).Warnf("Failed to cleanup temp split files: %s", err)

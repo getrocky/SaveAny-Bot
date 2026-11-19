@@ -22,6 +22,7 @@ import (
 
 var _ core.Executable = (*Task)(nil)
 var _ core.DestinationInfo = (*Task)(nil)
+var _ core.CacheKeyer = (*Task)(nil)
 
 type TaskElement struct {
 	ID               string
@@ -66,6 +67,16 @@ func (t *Task) Title() string {
 
 func (t *Task) Type() tasktype.TaskType {
 	return tasktype.TaskTypeTgfiles
+}
+
+// CacheKeys implements core.CacheKeyer: every file of the batch has its own
+// cache entry named after the element ID.
+func (t *Task) CacheKeys() []string {
+	keys := make([]string, 0, len(t.elems))
+	for i := range t.elems {
+		keys = append(keys, t.elems[i].ID)
+	}
+	return keys
 }
 
 func NewTaskElement(
